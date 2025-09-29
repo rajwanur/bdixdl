@@ -27,7 +27,8 @@ DRY_RUN=0
 QUIET=0
 RESUME=0
 CONFIG_FILE="$DEFAULT_CONFIG_FILE"
-TEMP_DIR="/tmp/${SCRIPT_NAME}_$$"
+# Use a more portable temporary directory location
+TEMP_DIR="${TMPDIR:-/tmp}/${SCRIPT_NAME}_$$"
 MATCHING_FOLDERS=""
 TOTAL_FILES=0
 DOWNLOADED_FILES=0
@@ -150,13 +151,70 @@ url_decode() {
 # Get href paths from HTML, excluding navigation links
 get_href_paths() {
     url="$1"
-    curl -s -L --max-redirs 3 --connect-timeout 10 --max-time 30 "$url" 2>/dev/null | \
+    log "  Fetching URL: $url"
+    
+    # Fix URL protocol if needed
+    url=$(echo "$url" | sed 's|^http:/\([^/]\)|http://\1|')
+    
+    # Fetch the HTML content and save to a temporary file for debugging
+    html_content="$TEMP_DIR/html_content_$$.html"
+    mkdir -p "$TEMP_DIR" 2>/dev/null
+    curl -s -L --max-redirs 3 --connect-timeout 10 --max-time 30 "$url" 2>/dev/null > "$html_content"
+    
+    # Check if we got any content
+    if [ ! -s "$html_content" ]; then
+        log "  ERROR: No content received from URL"
+        return 1
+    fi
+    
+    # Debug output
+    content_size=$(wc -c < "$html_content")
+    log "  Received HTML content: $content_size bytes"
+    
+    # More flexible pattern matching for different h5ai implementations
+    # First try the standard h5ai pattern
+    cat "$html_content" | \
+    tr -d '\n' | \
+    grep -Eo '<li[^>]*class="[^"]*folder[^"]*"[^>]*>.*?<a[^>]*href="[^"]*"' | \
     grep -o 'href="[^"]*"' | \
     sed 's/href="//;s/"//' | \
-    grep -v '^[.]\{1,2\}/$' | \
+    grep -v '^[.]\{1,2\}/' | \
     grep -v '^#' | \
     grep -v '^[?]' | \
-    sort -u
+    grep -v '\[[0-9:]\+\]' | \
+    sed 's|/$||' | \
+    sort -u > "$TEMP_DIR/links_$$.txt"
+    
+    # Debug output for first method
+    link_count=$(wc -l < "$TEMP_DIR/links_$$.txt")
+    log "  Standard pattern found $link_count links"
+    
+    # If no results, try a more general approach to find all links
+    if [ ! -s "$TEMP_DIR/links_$$.txt" ]; then
+        log "  Trying alternative HTML parsing method"
+        cat "$html_content" | \
+        tr -d '\n' | \
+        grep -o '<a[^>]*href="[^"]*"[^>]*>' | \
+        grep -o 'href="[^"]*"' | \
+        sed 's/href="//;s/"//' | \
+        grep -v '^[.]\{1,2\}/' | \
+        grep -v '^#' | \
+        grep -v '^[?]' | \
+        grep -v '\[[0-9:]\+\]' | \
+        grep -E '/$|[^.]+$|\.[^/.]+/$' | \
+        sed 's|/$||' | \
+        sort -u > "$TEMP_DIR/links_$$.txt"
+        
+        # Debug output for alternative method
+        link_count=$(wc -l < "$TEMP_DIR/links_$$.txt")
+        log "  Alternative pattern found $link_count links"
+    fi
+    
+    # Output the results
+    cat "$TEMP_DIR/links_$$.txt"
+    
+    # Clean up temporary files
+    rm -f "$html_content" "$TEMP_DIR/links_$$.txt"
 }
 
 # Check if string contains any of the keywords (case-insensitive)
@@ -227,6 +285,18 @@ find_matching_folders() {
     log "Searching: $current_display_path (depth: $current_depth)"
     log "  URL: $current_url"
 
+    # Fix URL protocol if needed
+    current_url=$(echo "$current_url" | sed 's|^http:/\([^/]\)|http://\1|')
+    
+    # Ensure URL ends with a slash for consistency
+    current_url="${current_url%/}/"
+    
+    # Remove any timestamp patterns from URL
+    current_url=$(echo "$current_url" | sed 's/\[[0-9:]\+\]//g')
+    
+    # Normalize URL by removing duplicate slashes
+    current_url=$(echo "$current_url" | sed 's|//*/|/|g' | sed 's|^\(https\?:\)\(/\)\+|\1//|')
+
     # Get directory listing
     href_paths=$(get_href_paths "$current_url")
     if [ -z "$href_paths" ]; then
@@ -236,6 +306,7 @@ find_matching_folders() {
 
     # Save to temp file to avoid subshell issues
     temp_links="$TEMP_DIR/links_$$_$current_depth"
+    mkdir -p "$TEMP_DIR" 2>/dev/null
     printf '%s\n' "$href_paths" > "$temp_links"
 
     # Extract base domain for filtering
@@ -245,6 +316,17 @@ find_matching_folders() {
     while IFS= read -r link_path || [ -n "$link_path" ]; do
         [ -z "$link_path" ] && continue
 
+        # Skip h5ai internal paths
+        case "$link_path" in
+            */_h5ai/*)
+                log "    Skipping h5ai internal path: $link_path"
+                continue
+                ;;
+        esac
+
+        # Remove any timestamp patterns from link_path
+        link_path=$(echo "$link_path" | sed 's/\[[0-9:]\+\]//g')
+
         # Skip external URLs that don't belong to our domain
         if echo "$link_path" | grep -q '^https\?://'; then
             if echo "$link_path" | grep -q "^$base_domain"; then
@@ -252,7 +334,23 @@ find_matching_folders() {
                 decoded_path=$(url_decode "$link_path")
                 folder_name=$(basename "$decoded_path")
                 full_folder_url="$link_path"
-                display_path="$current_display_path/$folder_name"
+                if ! echo "$full_folder_url" | grep -q '/$'; then
+                    full_folder_url="${full_folder_url}/"
+                fi
+                
+                # Fix URL protocol if needed
+                full_folder_url=$(echo "$full_folder_url" | sed 's|^http:/\([^/]\)|http://\1|')
+                
+                # Normalize URL by removing duplicate slashes
+                full_folder_url=$(echo "$full_folder_url" | sed 's|//*/|/|g' | sed 's|^\(https\?:\)\(/\)\+|\1//|')
+                
+                # Skip if URL is the same as current URL (prevents infinite loops)
+                if [ "$full_folder_url" = "$current_url" ]; then
+                    log "    Skipping already processed URL: $full_folder_url"
+                    continue
+                fi
+                
+                display_path="${full_folder_url#$BASE_URL}"
 
                 log "    Found directory: $folder_name"
 
@@ -267,37 +365,46 @@ find_matching_folders() {
             continue
         fi
 
-        # Skip non-directory links
-        if ! echo "$link_path" | grep -q '/$'; then
-            continue
-        fi
-
-        # Decode the path for display
-        decoded_path=$(url_decode "$link_path")
-
-        # Skip h5ai internal paths
-        case "$decoded_path" in
-            /_h5ai/*)
-                log "    Skipping h5ai internal path: $decoded_path"
+        # Skip navigation links
+        case "$link_path" in
+            .|..|./|../)
                 continue
                 ;;
         esac
 
-        folder_name="${decoded_path%/}"
+        # Decode the path for display
+        decoded_path=$(url_decode "$link_path")
+        folder_name=$(basename "${decoded_path%/}")
 
         # Build proper URL - handle both relative and absolute paths correctly
         if echo "$link_path" | grep -q '^/'; then
             # Absolute path - combine with base domain
-            full_folder_url="$base_domain$link_path"
+            full_folder_url="$base_domain${link_path}/"
         else
             # Relative path
-            full_folder_url="${current_url%/}/$link_path"
+            full_folder_url="${current_url%/}/${link_path}/"
         fi
 
+        # Ensure URL ends with a slash
+        full_folder_url="${full_folder_url%/}/"
+        
+        # Fix URL protocol if needed
+        full_folder_url=$(echo "$full_folder_url" | sed 's|^http:/\([^/]\)|http://\1|')
+        
+        # Normalize URL by removing duplicate slashes
+        full_folder_url=$(echo "$full_folder_url" | sed 's|//*/|/|g' | sed 's|^\(https\?:\)\(/\)\+|\1//|')
+        
+        # Skip if URL is the same as current URL (prevents infinite loops)
+        if [ "$full_folder_url" = "$current_url" ]; then
+            log "    Skipping already processed URL: $full_folder_url"
+            continue
+        fi
+        
+        # Create display path
         display_path="$current_display_path/$folder_name"
-
+        
         log "    Found directory: $folder_name"
-        log "    Clean URL: $full_folder_url"
+        log "    Full URL: $full_folder_url"
 
         # Check if folder matches keywords
         if matches_keywords "$folder_name"; then
@@ -615,30 +722,58 @@ main() {
         exit 0
     fi
 
-    # Display matches with clean formatting and debug URLs
+    # Display matches with clean formatting
     log "Found matching folders:"
     count=0
+    selected_indices=""
     while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
         count=$((count + 1))
         printf "  %d. %s\n" "$count" "$folder_name"
         log "     URL: $folder_url"
     done < "$TEMP_DIR/matches"
 
-    # Confirm download
+    # Folder selection logic
     if [ "$DRY_RUN" -eq 0 ]; then
-        printf "\nProceed with download? [y/N]: "
+        printf "\nEnter folders to download (comma-separated numbers, 'a' for all): "
         read -r response
         case "$response" in
-            [Yy]|[Yy][Ee][Ss]) ;;
-            *) log "Download cancelled."; exit 0 ;;
+            [Aa]*) # Select all
+                selected_indices=$(seq -s, 1 $count)
+                ;;
+            *) # Process individual selections
+                selected_indices=$(echo "$response" | tr ',' '\n' | \
+                    grep -o '[0-9]\+' | \
+                    sort -nu | \
+                    awk -v max="$count" '$1 > 0 && $1 <= max' | \
+                    tr '\n' ',')
+                ;;
         esac
+
+        [ -z "$selected_indices" ] && { log "No valid selections made. Exiting."; exit 0; }
+    else
+        selected_indices=$(seq -s, 1 $count)
     fi
+
+    # Filter matches based on selection
+    filtered_matches="$TEMP_DIR/filtered_matches"
+    awk -F'|' -v indices="$selected_indices" '
+    BEGIN {
+        split(indices, arr, /,/)
+        for (i in arr) selections[arr[i]] = 1
+        count = 0
+    }
+    {
+        count++
+        if (count in selections) print
+    }' "$TEMP_DIR/matches" > "$filtered_matches"
+
+    mv "$filtered_matches" "$TEMP_DIR/matches"
 
     # Create download directory
     mkdir -p "$DOWNLOAD_DESTINATION" || die "Cannot create download directory: $DOWNLOAD_DESTINATION"
 
-    # Process each matching folder
-    log "Processing folders..."
+    # Process selected folders
+    log "Processing selected folders..."
     while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
         log "Processing folder: $folder_name"
         log "  URL: $folder_url"
