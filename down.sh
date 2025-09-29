@@ -152,25 +152,25 @@ url_decode() {
 get_href_paths() {
     url="$1"
     log "  Fetching URL: $url"
-    
+
     # Fix URL protocol if needed
     url=$(echo "$url" | sed 's|^http:/\([^/]\)|http://\1|')
-    
+
     # Fetch the HTML content and save to a temporary file for debugging
     html_content="$TEMP_DIR/html_content_$$.html"
     mkdir -p "$TEMP_DIR" 2>/dev/null
     curl -s -L --max-redirs 3 --connect-timeout 10 --max-time 30 "$url" 2>/dev/null > "$html_content"
-    
+
     # Check if we got any content
     if [ ! -s "$html_content" ]; then
         log "  ERROR: No content received from URL"
         return 1
     fi
-    
+
     # Debug output
     content_size=$(wc -c < "$html_content")
     log "  Received HTML content: $content_size bytes"
-    
+
     # More flexible pattern matching for different h5ai implementations
     # First try the standard h5ai pattern
     cat "$html_content" | \
@@ -182,13 +182,12 @@ get_href_paths() {
     grep -v '^#' | \
     grep -v '^[?]' | \
     grep -v '\[[0-9:]\+\]' | \
-    sed 's|/$||' | \
     sort -u > "$TEMP_DIR/links_$$.txt"
-    
+
     # Debug output for first method
     link_count=$(wc -l < "$TEMP_DIR/links_$$.txt")
     log "  Standard pattern found $link_count links"
-    
+
     # If no results, try a more general approach to find all links
     if [ ! -s "$TEMP_DIR/links_$$.txt" ]; then
         log "  Trying alternative HTML parsing method"
@@ -201,18 +200,16 @@ get_href_paths() {
         grep -v '^#' | \
         grep -v '^[?]' | \
         grep -v '\[[0-9:]\+\]' | \
-        grep -E '/$|[^.]+$|\.[^/.]+/$' | \
-        sed 's|/$||' | \
         sort -u > "$TEMP_DIR/links_$$.txt"
-        
+
         # Debug output for alternative method
         link_count=$(wc -l < "$TEMP_DIR/links_$$.txt")
         log "  Alternative pattern found $link_count links"
     fi
-    
+
     # Output the results
     cat "$TEMP_DIR/links_$$.txt"
-    
+
     # Clean up temporary files
     rm -f "$html_content" "$TEMP_DIR/links_$$.txt"
 }
@@ -287,13 +284,13 @@ find_matching_folders() {
 
     # Fix URL protocol if needed
     current_url=$(echo "$current_url" | sed 's|^http:/\([^/]\)|http://\1|')
-    
+
     # Ensure URL ends with a slash for consistency
     current_url="${current_url%/}/"
-    
+
     # Remove any timestamp patterns from URL
     current_url=$(echo "$current_url" | sed 's/\[[0-9:]\+\]//g')
-    
+
     # Normalize URL by removing duplicate slashes
     current_url=$(echo "$current_url" | sed 's|//*/|/|g' | sed 's|^\(https\?:\)\(/\)\+|\1//|')
 
@@ -337,19 +334,19 @@ find_matching_folders() {
                 if ! echo "$full_folder_url" | grep -q '/$'; then
                     full_folder_url="${full_folder_url}/"
                 fi
-                
+
                 # Fix URL protocol if needed
                 full_folder_url=$(echo "$full_folder_url" | sed 's|^http:/\([^/]\)|http://\1|')
-                
+
                 # Normalize URL by removing duplicate slashes
                 full_folder_url=$(echo "$full_folder_url" | sed 's|//*/|/|g' | sed 's|^\(https\?:\)\(/\)\+|\1//|')
-                
+
                 # Skip if URL is the same as current URL (prevents infinite loops)
                 if [ "$full_folder_url" = "$current_url" ]; then
                     log "    Skipping already processed URL: $full_folder_url"
                     continue
                 fi
-                
+
                 display_path="${full_folder_url#$BASE_URL}"
 
                 log "    Found directory: $folder_name"
@@ -387,22 +384,22 @@ find_matching_folders() {
 
         # Ensure URL ends with a slash
         full_folder_url="${full_folder_url%/}/"
-        
+
         # Fix URL protocol if needed
         full_folder_url=$(echo "$full_folder_url" | sed 's|^http:/\([^/]\)|http://\1|')
-        
+
         # Normalize URL by removing duplicate slashes
         full_folder_url=$(echo "$full_folder_url" | sed 's|//*/|/|g' | sed 's|^\(https\?:\)\(/\)\+|\1//|')
-        
+
         # Skip if URL is the same as current URL (prevents infinite loops)
         if [ "$full_folder_url" = "$current_url" ]; then
             log "    Skipping already processed URL: $full_folder_url"
             continue
         fi
-        
+
         # Create display path
         display_path="$current_display_path/$folder_name"
-        
+
         log "    Found directory: $folder_name"
         log "    Full URL: $full_folder_url"
 
@@ -488,7 +485,7 @@ download_file() {
     fi
 }
 
-# Download files from a directory
+# Download files from a directory recursively
 download_directory_files() {
     remote_url="$1"
     local_base="$2"
@@ -506,17 +503,21 @@ download_directory_files() {
     # Debug: show what we found
     log "  Found $(printf '%s\n' "$href_paths" | wc -l) items in directory"
 
-    # Create local directory using just the folder basename
-    folder_basename=$(basename "$folder_name")
-    local_dir="$local_base/$folder_basename"
+    # Decode folder name for local directory creation
+    folder_name_decoded=$(url_decode "$folder_name")
+
+    # Create local directory - for initial call, use just the folder name
+    # For recursive calls, folder_name is just the subdirectory name
+    local_dir="$local_base/$folder_name_decoded"
     mkdir -p "$local_dir"
     log "  Created local directory: $local_dir"
 
     # Get base domain for absolute paths
     base_domain=$(echo "$BASE_URL" | sed 's|^\(https\?://[^/]*\).*|\1|')
 
-    # Process files
-    temp_file="$TEMP_DIR/download_$$"
+    # Process files and subdirectories
+    temp_file="$TEMP_DIR/download_$$_$(date +%s)"
+    temp_dirs="$TEMP_DIR/dirs_$$_$(date +%s)"
     found_files=0
 
     printf '%s\n' "$href_paths" | while IFS= read -r link_path; do
@@ -524,9 +525,10 @@ download_directory_files() {
 
         decoded_path=$(url_decode "$link_path")
 
-        # Skip directories
+        # Check if this is a directory
+        is_directory=0
         case "$decoded_path" in
-            */) continue ;;
+            */) is_directory=1 ;;
         esac
 
         # Skip external URLs that don't match our domain
@@ -537,6 +539,65 @@ download_directory_files() {
                 fi
                 ;;
         esac
+
+        # Process directories separately
+        if [ "$is_directory" -eq 1 ]; then
+            # Skip navigation directories and current directory
+            case "$link_path" in
+                .|..|./|../|*/_h5ai/*)
+                    continue
+                    ;;
+            esac
+
+            # Also skip based on decoded path
+            case "$decoded_path" in
+                */.|*/..|*/_h5ai/*|.|..)
+                    continue
+                    ;;
+            esac
+
+            subdir_name=$(basename "${decoded_path%/}")
+
+            # Skip if subdirectory name is empty or just whitespace
+            if [ -z "$subdir_name" ] || [ -z "$(echo "$subdir_name" | tr -d '[:space:]')" ]; then
+                log "    Skipping empty subdirectory name"
+                continue
+            fi
+
+            # Build subdirectory URL first to check if it's the current directory
+            case "$link_path" in
+                http://*|https://*)
+                    subdir_url="$link_path"
+                    ;;
+                /*)
+                    subdir_url="$base_domain${link_path%/}/"
+                    ;;
+                *)
+                    subdir_url="${remote_url%/}/${link_path%/}/"
+                    ;;
+            esac
+
+            # Normalize URL
+            subdir_url=$(echo "$subdir_url" | sed 's|//*/|/|g' | sed 's|^\(https\?:\)\(/\)\+|\1//|')
+
+            # Skip if subdirectory URL is the same as current URL (this catches self-referencing directories)
+            if [ "$subdir_url" = "$remote_url" ] || [ "${subdir_url%/}" = "${remote_url%/}" ]; then
+                log "    Skipping self-referencing directory: $subdir_name"
+                continue
+            fi
+
+            # Skip if subdirectory has the same name as current directory (additional safety check)
+            # Compare decoded names to handle URL encoding differences
+            if [ "$subdir_name" = "$folder_name_decoded" ] || [ "$subdir_name" = "$folder_name" ]; then
+                log "    Skipping subdirectory with same name as parent: $subdir_name"
+                continue
+            fi
+
+            log "    Found subdirectory: $subdir_name"
+            log "    Subdirectory URL: $subdir_url"
+            printf "%s|%s\n" "$subdir_url" "$subdir_name" >> "$temp_dirs"
+            continue
+        fi
 
         # Debug: show each file we're checking
         [ "$QUIET" -eq 0 ] && printf "    Checking: %s\n" "$decoded_path"
@@ -576,7 +637,7 @@ download_directory_files() {
     # Process downloads if we found any files
     if [ -f "$temp_file" ]; then
         file_count=$(wc -l < "$temp_file")
-        log "  Found $file_count files to download"
+        log "  Found $file_count files to download in this directory"
         TOTAL_FILES=$((TOTAL_FILES + file_count))
 
         if [ "$DRY_RUN" -eq 0 ]; then
@@ -592,6 +653,22 @@ download_directory_files() {
         rm -f "$temp_file"
     else
         log "  No supported files found in this directory"
+    fi
+
+    # Process subdirectories recursively
+    if [ -f "$temp_dirs" ]; then
+        subdir_count=$(wc -l < "$temp_dirs")
+        log "  Found $subdir_count subdirectories to process"
+
+        while IFS='|' read -r subdir_url subdir_name || [ -n "$subdir_url" ]; do
+            [ -z "$subdir_url" ] && continue
+
+            log "  Recursing into subdirectory: $subdir_name"
+            # Recursively download from subdirectory
+            download_directory_files "$subdir_url" "$local_dir" "$subdir_name"
+        done < "$temp_dirs"
+
+        rm -f "$temp_dirs"
     fi
 }
 
