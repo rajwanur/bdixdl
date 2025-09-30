@@ -26,12 +26,14 @@ MAX_THREADS="$DEFAULT_THREADS"
 DRY_RUN=0
 QUIET=0
 RESUME=0
+FORCE_OVERWRITE=0
 CONFIG_FILE="$DEFAULT_CONFIG_FILE"
 # Use a more portable temporary directory location
 TEMP_DIR="${TMPDIR:-/tmp}/${SCRIPT_NAME}_$$"
 MATCHING_FOLDERS=""
 TOTAL_FILES=0
 DOWNLOADED_FILES=0
+SKIPPED_FILES=0
 
 # --- Utility Functions ---
 
@@ -74,6 +76,7 @@ OPTIONS:
     -t, --threads NUM       Concurrent download threads (default: $DEFAULT_THREADS)
     -n, --dry-run          Show what would be downloaded without downloading
     -r, --resume           Resume interrupted downloads
+    -f, --force-overwrite  Force overwrite existing files (skip if same size by default)
     -q, --quiet            Suppress non-error output
     -c, --config FILE      Use custom config file (default: $DEFAULT_CONFIG_FILE)
     -h, --help             Show this help message
@@ -406,6 +409,8 @@ find_matching_folders() {
         # Check if folder matches keywords
         if matches_keywords "$folder_name"; then
             log "  -> MATCH: $folder_name"
+            log "  DEBUG: Storing in matches - folder_name='$folder_name', display_path='$display_path'"
+            # Store only the base folder name, not the full path
             printf '%s|%s|%s\n' "$full_folder_url" "$display_path" "$folder_name" >> "$TEMP_DIR/matches"
         fi
 
@@ -451,6 +456,27 @@ count_directory_files() {
     printf '%s\n' "$count"
 }
 
+# Get remote file size using HTTP HEAD request
+get_remote_file_size() {
+    file_url="$1"
+
+    # Use curl to get Content-Length header
+    size=$(curl --silent --head --location --max-redirs 3 --connect-timeout 10 --max-time 30 "$file_url" | \
+           grep -i "^Content-Length:" | \
+           sed 's/^[^:]*: *//' | \
+           tr -d '\r' | \
+           head -1)
+
+    # Return 0 if we can't determine size (allows download to proceed)
+    if [ -z "$size" ] || ! echo "$size" | grep -q '^[0-9]\+$'; then
+        printf '0\n'
+        return 1
+    fi
+
+    printf '%s\n' "$size"
+    return 0
+}
+
 # Download a single file with progress
 download_file() {
     file_url="$1"
@@ -460,13 +486,37 @@ download_file() {
     local_dir=$(dirname "$local_path")
     mkdir -p "$local_dir" || return 1
 
+    # Check if file exists and we should verify size
+    if [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 0 ]; then
+        # Get local file size
+        local_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+
+        # Get remote file size
+        remote_size=$(get_remote_file_size "$file_url")
+
+        if [ "$remote_size" -gt 0 ] && [ "$local_size" -eq "$remote_size" ]; then
+            # File exists and sizes match - skip download
+            log "  Skipping: $filename (already exists, same size: $local_size bytes)"
+            SKIPPED_FILES=$((SKIPPED_FILES + 1))
+            return 0
+        elif [ "$remote_size" -gt 0 ] && [ "$local_size" -ne "$remote_size" ]; then
+            # File exists but sizes differ - download will overwrite
+            log "  Replacing: $filename (exists but size differs: local $local_size vs remote $remote_size bytes)"
+        else
+            # Could not determine remote size - proceed with download
+            log "  Redownloading: $filename (exists but remote size unknown)"
+        fi
+    elif [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 1 ]; then
+        # File exists but force overwrite is enabled
+        log "  Overwriting: $filename (force overwrite enabled)"
+    fi
+
     if [ "$QUIET" -eq 0 ]; then
         printf "  Downloading: %s\n" "$filename"
         printf "  URL: %s\n" "$file_url"
         printf "  Local path: %s\n" "$local_path"
     fi
 
-    # Use curl instead of wget for better error handling
     curl_opts="--silent --location --retry 3 --connect-timeout 30 --max-time 300"
     [ "$RESUME" -eq 1 ] && curl_opts="$curl_opts --continue-at -"
 
@@ -492,6 +542,8 @@ download_directory_files() {
     folder_name="$3"
 
     log "Processing: $folder_name"
+    log "  DEBUG: Received folder_name='$folder_name'"
+    log "  DEBUG: Received local_base='$local_base'"
     log "  Fetching directory listing from: $remote_url"
 
     href_paths=$(get_href_paths "$remote_url")
@@ -506,8 +558,7 @@ download_directory_files() {
     # Decode folder name for local directory creation
     folder_name_decoded=$(url_decode "$folder_name")
 
-    # Create local directory - for initial call, use just the folder name
-    # For recursive calls, folder_name is just the subdirectory name
+    # Create local directory - use the folder name directly without accumulating paths
     local_dir="$local_base/$folder_name_decoded"
     mkdir -p "$local_dir"
     log "  Created local directory: $local_dir"
@@ -595,6 +646,7 @@ download_directory_files() {
 
             log "    Found subdirectory: $subdir_name"
             log "    Subdirectory URL: $subdir_url"
+            log "    DEBUG: Storing subdirectory name: '$subdir_name'"
             printf "%s|%s\n" "$subdir_url" "$subdir_name" >> "$temp_dirs"
             continue
         fi
@@ -664,8 +716,9 @@ download_directory_files() {
             [ -z "$subdir_url" ] && continue
 
             log "  Recursing into subdirectory: $subdir_name"
-            # Recursively download from subdirectory
-            download_directory_files "$subdir_url" "$local_dir" "$subdir_name"
+            log "  DEBUG: About to call download_directory_files with folder_name='$subdir_name'"
+            # Recursively download from subdirectory - use original local_base to avoid nested directories
+            download_directory_files "$subdir_url" "$local_base" "$subdir_name"
         done < "$temp_dirs"
 
         rm -f "$temp_dirs"
@@ -697,6 +750,10 @@ parse_arguments() {
                 ;;
             -r|--resume)
                 RESUME=1
+                shift
+                ;;
+            -f|--force-overwrite)
+                FORCE_OVERWRITE=1
                 shift
                 ;;
             -q|--quiet)
@@ -855,14 +912,22 @@ main() {
         log "Processing folder: $folder_name"
         log "  URL: $folder_url"
         log "  Path: $folder_path"
-        download_directory_files "$folder_url" "$DOWNLOAD_DESTINATION" "$folder_name"
+        log "  DEBUG: Original folder_name='$folder_name'"
+        # Use only the base folder name, not the full path
+        base_folder_name=$(basename "$folder_name")
+        log "  DEBUG: base_folder_name='$base_folder_name'"
+        download_directory_files "$folder_url" "$DOWNLOAD_DESTINATION" "$base_folder_name"
     done < "$TEMP_DIR/matches"
 
     # Summary
     if [ "$DRY_RUN" -eq 1 ]; then
         log "Dry run completed. Found $TOTAL_FILES files that would be downloaded."
     else
-        log "Download completed. Downloaded $DOWNLOADED_FILES out of $TOTAL_FILES files."
+        if [ "$SKIPPED_FILES" -gt 0 ]; then
+            log "Download completed. Downloaded $DOWNLOADED_FILES out of $TOTAL_FILES files. Skipped $SKIPPED_FILES files (already exist with same size)."
+        else
+            log "Download completed. Downloaded $DOWNLOADED_FILES out of $TOTAL_FILES files."
+        fi
         log "Files saved to: $DOWNLOAD_DESTINATION"
     fi
 }
