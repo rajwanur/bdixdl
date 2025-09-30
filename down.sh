@@ -3,7 +3,7 @@
 # bdixdl - POSIX-compliant H5AI media downloader
 # Downloads media files from h5ai HTTP directory listings with advanced features
 
-VERSION="2.0.0"
+VERSION="1.0.0"
 SCRIPT_NAME="bdixdl"
 
 # --- Default Configuration ---

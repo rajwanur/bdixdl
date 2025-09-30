@@ -1,0 +1,138 @@
+# Temporary files and directories
+*.tmp
+*.temp
+*.log
+*.swp
+*.swo
+*~
+
+# Script execution artifacts
+bdixdl_*/
+*_$$*/
+*_*/
+
+# Download directories (common locations)
+/downloads/
+/Downloads/
+/downloads*/
+/Downloads*/
+*.downloads
+*.Downloads
+
+# Configuration files with sensitive data
+*.conf
+*.config
+/config/
+/.config/
+
+# Cache and data files
+.cache/
+*.cache
+*.dat
+*.data
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary script files
+/tmp/
+/tmp*/
+/temp/
+/temp*/
+
+# Test files and sample downloads
+test/
+tests/
+sample*/
+example*/
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Archive files (unless they're part of the project)
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Network and download artifacts
+*.part
+*.crdownload
+*.download
+
+# Session files
+*.session
+*.cookies
+
+# Lock files
+*.lock
+*.pid
+
+# Output files
+*.out
+*.output
+
+# Debug files
+debug/
+debug*/
+*.debug
+
+# User-specific files
+*.user
+*.userprefs
+
+# Build artifacts (if any)
+build/
+dist/
+*.o
+*.exe
+
+# Documentation build files
+docs/_build/
+docs/build/
+
+# Virtual environment files (if Python is used for any tools)
+venv/
+env/
+.venv/
+.env/
+
+# Node.js related (if any JS tools are used)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+.nyc_output
+
+# dotenv environment variables file
+.env
+.env.test
+.env.production
+
+# Ignore any user-specific config files that might be created
+~/.config/bdixdl.conf
