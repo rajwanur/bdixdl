@@ -5,10 +5,11 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![POSIX](https://img.shields.io/badge/POSIX--compatible-brightgreen.svg)
 
-A powerful POSIX-compliant shell script for downloading media files from **h5ai** HTTP directory listings with advanced search and filtering capabilities.
+A powerful POSIX-compliant shell script for downloading media files from **h5ai** HTTP directory listings with advanced search, filtering, and progress tracking capabilities.
 
 ## Features
 
+### Core Functionality
 - **Smart Search**: Find folders containing specific keywords in their names
 - **Recursive Directory Traversal**: Search nested directories up to configurable depth
 - **Multi-format Support**: Download videos, images, and subtitles
@@ -20,6 +21,13 @@ A powerful POSIX-compliant shell script for downloading media files from **h5ai*
 - **Dry Run Mode**: Preview what would be downloaded without actual downloading
 - **Configurable**: Extensive configuration options via command line or config file
 - **Interactive Selection**: Choose which matching folders to download after search
+- **Pre-scan Analysis**: Comprehensive analysis of all files before downloading
+- **Detailed Download Summary**: Shows file counts, sizes, and estimated download time by type
+- **Real-time Progress Tracking**: Live progress display with speed, ETA, and visual progress bar
+- **Smart File Management**: Automatically skips existing files with matching sizes
+- **User Confirmation**: Interactive confirmation before starting downloads
+- **File Type Categorization**: Separate tracking and reporting for media, images, and subtitles
+- **Progress Configuration**: Configurable progress display (can be disabled for cleaner output)
 
 ## Prerequisites
 
@@ -53,6 +61,7 @@ These are typically available on most Unix-like systems (Linux, macOS, BSD, etc.
    MAX_THREADS=3
    RESUME=1
    QUIET=0
+   SHOW_PROGRESS=1
    EOF
    ```
 
@@ -104,7 +113,7 @@ These are typically available on most Unix-like systems (Linux, macOS, BSD, etc.
 | `-h, --help` | Show help message | - |
 | `-v, --version` | Show version information | - |
 
-### File
+### Configuration File
 
 Create a configuration file at `~/.config/bdixdl.conf` (or specify custom path with `-c`):
 
@@ -123,13 +132,28 @@ RESUME=1
 
 # Suppress non-error output
 QUIET=0
+
+# Show detailed progress display (1=enabled, 0=disabled)
+SHOW_PROGRESS=1
 ```
 
 ## Workflow
 
 1. **Search Phase**: The script recursively searches the h5ai server for folders matching your keywords
 2. **Selection Phase**: Interactive selection of which folders to download (skip in dry-run mode)
-3. **Download Phase**: Downloads all supported media files from selected folders
+3. **Pre-scan Analysis**: Comprehensive analysis of all files in selected folders
+   - Checks existing files and sizes
+   - Categorizes files by type (media, images, subtitles)
+   - Builds download queue with all file information
+4. **Summary Display**: Shows detailed download summary including:
+   - File counts and sizes by type
+   - Files to skip (already exist)
+   - Total download size and estimated time
+5. **User Confirmation**: Interactive confirmation before starting downloads
+6. **Download Phase**: Downloads files with real-time progress tracking
+   - Shows current file, progress percentage, speed, and ETA
+   - Visual progress bar
+   - File-by-file progress updates
 
 ## How It Works
 
@@ -139,16 +163,33 @@ QUIET=0
 - Supports both relative and absolute URLs
 - Filters out **h5ai** internal paths and navigation links
 
-### Filtering
+### Pre-scan Analysis
+- Recursively scans all selected folders before downloading
+- Checks for existing files and compares sizes to avoid duplicates
+- Categorizes files by type (media, images, subtitles)
+- Builds comprehensive download queue with metadata
+- Calculates total download size and estimates time
+
+### Smart Filtering
 - Only downloads files with supported extensions
-- Skips existing files with matching sizes (unless force overwrite is enabled)
+- Automatically skips existing files with matching sizes
+- Detects incomplete downloads and offers to resume/replace
 - Validates file extensions before download attempts
+- Provides detailed file type statistics
+
+### Progress Tracking
+- Real-time progress display with file-by-file updates
+- Shows current download speed and remaining time (ETA)
+- Visual progress bar with percentage completion
+- Separate tracking for each file type category
+- Configurable progress display (can be disabled)
 
 ### Management
 - Supports concurrent downloads with configurable thread count
 - Implements resume functionality for interrupted transfers
 - Provides detailed progress logging and error reporting
 - Creates local directory structure matching remote organization
+- User confirmation before starting downloads
 
 ## Troubleshooting
 
@@ -223,6 +264,18 @@ If you encounter any issues or have questions:
 - Improved URL normalization and path handling
 - Added interactive folder selection
 - Better support for different server configurations
+
+### Enhanced Features (Added in v1.0.0+)
+- **Pre-scan Analysis**: Comprehensive file analysis before downloading
+- **Detailed Download Summary**: Professional summary with file counts, sizes, and time estimates
+- **Real-time Progress Tracking**: Live progress display with speed, ETA, and visual progress bar
+- **Smart File Management**: Automatic skipping of existing files with matching sizes
+- **User Confirmation**: Interactive confirmation before starting downloads
+- **File Type Categorization**: Separate tracking for media, images, and subtitles
+- **Progress Configuration**: Configurable progress display (SHOW_PROGRESS option)
+- **Enhanced Workflow**: Improved 6-step workflow with pre-scan and confirmation phases
+- **Better Error Reporting**: Enhanced HTTP status code reporting and error details
+- **Memory Efficiency**: Improved temporary file management for large operations
 
 ---
 

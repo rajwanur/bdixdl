@@ -1,4 +1,4 @@
-#!/bin/sh
+﻿#!/bin/sh
 
 # bdixdl - POSIX-compliant H5AI media downloader
 # Downloads media files from h5ai HTTP directory listings with advanced features
@@ -34,6 +34,23 @@ MATCHING_FOLDERS=""
 TOTAL_FILES=0
 DOWNLOADED_FILES=0
 SKIPPED_FILES=0
+
+# New variables for enhanced tracking
+MEDIA_FILES_COUNT=0
+POSTER_FILES_COUNT=0
+SUBTITLE_FILES_COUNT=0
+MEDIA_TOTAL_SIZE=0
+POSTER_TOTAL_SIZE=0
+SUBTITLE_TOTAL_SIZE=0
+MEDIA_SKIPPED_COUNT=0
+POSTER_SKIPPED_COUNT=0
+SUBTITLE_SKIPPED_COUNT=0
+DOWNLOAD_QUEUE_FILE=""
+CURRENT_FILE_NUMBER=0
+TOTAL_FILES_TO_DOWNLOAD=0
+START_TIME=0
+DOWNLOADED_BYTES=0
+SHOW_PROGRESS=1  # 1=show detailed progress, 0=simple progress
 
 # --- Utility Functions ---
 
@@ -90,10 +107,11 @@ CONFIG FILE:
     MAX_THREADS=3
     RESUME=1
     QUIET=0
+    SHOW_PROGRESS=1
 
 EXAMPLES:
-    $SCRIPT_NAME https://ftp.isp.net/media/ "movie 2023"
-    $SCRIPT_NAME -n -t 5 https://server.com/files/ "documentary nature"
+    $SCRIPT_NAME https://ftp.yourserever.net/media/ "movie 2023"
+    $SCRIPT_NAME -n -t 5 https://yourserever.com/files/ "documentary nature"
     $SCRIPT_NAME --dry-run --depth 3 http://192.168.1.1/media/ "series season"
 
 SUPPORTED FILE TYPES:
@@ -142,6 +160,7 @@ load_config() {
             MAX_THREADS) MAX_THREADS="$value" ;;
             RESUME) RESUME="$value" ;;
             QUIET) QUIET="$value" ;;
+            SHOW_PROGRESS) SHOW_PROGRESS="$value" ;;
         esac
     done < "$CONFIG_FILE"
 }
@@ -151,10 +170,64 @@ url_decode() {
     printf '%s' "$1" | sed 's/+/ /g; s/%20/ /g; s/%21/!/g; s/%22/"/g; s/%23/#/g; s/%24/$/g; s/%25/%/g; s/%26/\&/g; s/%27/'"'"'/g; s/%28/(/g; s/%29/)/g; s/%2A/*/g; s/%2B/+/g; s/%2C/,/g; s/%2D/-/g; s/%2E/./g; s/%2F/\//g; s/%5B/[/g; s/%5D/]/g; s/%C2%BD/½/g'
 }
 
+# Format bytes to human-readable format
+format_bytes() {
+    bytes="$1"
+    if [ "$bytes" -lt 1024 ]; then
+        printf "%d B" "$bytes"
+    elif [ "$bytes" -lt 1048576 ]; then
+        printf "%.1f KB" "$(echo "$bytes 1024" | awk '{printf $1/$2}')"
+    elif [ "$bytes" -lt 1073741824 ]; then
+        printf "%.1f MB" "$(echo "$bytes 1048576" | awk '{printf $1/$2}')"
+    else
+        printf "%.1f GB" "$(echo "$bytes 1073741824" | awk '{printf $1/$2}')"
+    fi
+}
+
+# Get file type category
+get_file_type() {
+    filename="$1"
+
+    # Check if filename has an extension
+    case "$filename" in
+        *.*) ;;
+        *) printf "unknown" && return ;;
+    esac
+
+    # Extract extension and convert to lowercase
+    ext=$(printf '%s' "$filename" | sed 's/.*\.//' | tr '[:upper:]' '[:lower:]')
+
+    # Check media extensions
+    for media_ext in $MEDIA_EXTENSIONS; do
+        if [ "$ext" = "$media_ext" ]; then
+            printf "media"
+            return
+        fi
+    done
+
+    # Check poster extensions
+    for poster_ext in $POSTER_EXTENSIONS; do
+        if [ "$ext" = "$poster_ext" ]; then
+            printf "poster"
+            return
+        fi
+    done
+
+    # Check subtitle extensions
+    for subtitle_ext in $SUBTITLE_EXTENSIONS; do
+        if [ "$ext" = "$subtitle_ext" ]; then
+            printf "subtitle"
+            return
+        fi
+    done
+
+    printf "unknown"
+}
+
 # Get href paths from HTML, excluding navigation links
 get_href_paths() {
     url="$1"
-    log "  Fetching URL: $url"
+    # log "  Fetching URL: $url"
 
     # Fix URL protocol if needed
     url=$(echo "$url" | sed 's|^http:/\([^/]\)|http://\1|')
@@ -174,41 +247,23 @@ get_href_paths() {
     content_size=$(wc -c < "$html_content")
     log "  Received HTML content: $content_size bytes"
 
-    # More flexible pattern matching for different h5ai implementations
-    # First try the standard h5ai pattern
+    # Try to find all links (both files and directories)
+    # Use a more general approach to find all href attributes
     cat "$html_content" | \
     tr -d '\n' | \
-    grep -Eo '<li[^>]*class="[^"]*folder[^"]*"[^>]*>.*?<a[^>]*href="[^"]*"' | \
+    grep -o '<a[^>]*href="[^"]*"[^>]*>' | \
     grep -o 'href="[^"]*"' | \
     sed 's/href="//;s/"//' | \
     grep -v '^[.]\{1,2\}/' | \
     grep -v '^#' | \
     grep -v '^[?]' | \
     grep -v '\[[0-9:]\+\]' | \
+    grep -v '_h5ai' | \
     sort -u > "$TEMP_DIR/links_$$.txt"
 
-    # Debug output for first method
+    # Debug output
     link_count=$(wc -l < "$TEMP_DIR/links_$$.txt")
-    log "  Standard pattern found $link_count links"
-
-    # If no results, try a more general approach to find all links
-    if [ ! -s "$TEMP_DIR/links_$$.txt" ]; then
-        log "  Trying alternative HTML parsing method"
-        cat "$html_content" | \
-        tr -d '\n' | \
-        grep -o '<a[^>]*href="[^"]*"[^>]*>' | \
-        grep -o 'href="[^"]*"' | \
-        sed 's/href="//;s/"//' | \
-        grep -v '^[.]\{1,2\}/' | \
-        grep -v '^#' | \
-        grep -v '^[?]' | \
-        grep -v '\[[0-9:]\+\]' | \
-        sort -u > "$TEMP_DIR/links_$$.txt"
-
-        # Debug output for alternative method
-        link_count=$(wc -l < "$TEMP_DIR/links_$$.txt")
-        log "  Alternative pattern found $link_count links"
-    fi
+    log "  Found $link_count total links"
 
     # Output the results
     cat "$TEMP_DIR/links_$$.txt"
@@ -282,8 +337,8 @@ find_matching_folders() {
         return 0
     fi
 
-    log "Searching: $current_display_path (depth: $current_depth)"
-    log "  URL: $current_url"
+    # log "Searching: $current_display_path (depth: $current_depth)"
+    # log "  URL: $current_url"
 
     # Fix URL protocol if needed
     current_url=$(echo "$current_url" | sed 's|^http:/\([^/]\)|http://\1|')
@@ -300,7 +355,7 @@ find_matching_folders() {
     # Get directory listing
     href_paths=$(get_href_paths "$current_url")
     if [ -z "$href_paths" ]; then
-        log "  No links found in directory"
+        # log "  No links found in directory"
         return 0
     fi
 
@@ -461,7 +516,7 @@ get_remote_file_size() {
     file_url="$1"
 
     # Use curl to get Content-Length header
-    size=$(curl --silent --head --location --max-redirs 3 --connect-timeout 10 --max-time 30 "$file_url" | \
+    size=$(curl --silent --head --location --max-redirs 3 --connect-timeout 10 --max-time 30 "$file_url" 2>/dev/null | \
            grep -i "^Content-Length:" | \
            sed 's/^[^:]*: *//' | \
            tr -d '\r' | \
@@ -477,11 +532,435 @@ get_remote_file_size() {
     return 0
 }
 
+# Scan and analyze files for download
+scan_and_analyze_files() {
+    log "Scanning and analyzing files for download..."
+
+    # Reset counters
+    MEDIA_FILES_COUNT=0
+    POSTER_FILES_COUNT=0
+    SUBTITLE_FILES_COUNT=0
+    MEDIA_TOTAL_SIZE=0
+    POSTER_TOTAL_SIZE=0
+    SUBTITLE_TOTAL_SIZE=0
+    MEDIA_SKIPPED_COUNT=0
+    POSTER_SKIPPED_COUNT=0
+    SUBTITLE_SKIPPED_COUNT=0
+
+    DOWNLOAD_QUEUE_FILE="$TEMP_DIR/download_queue_$$.txt"
+
+    # Initialize processed URLs tracking file to prevent duplicate processing
+    > "$TEMP_DIR/processed_urls"
+
+    # Process each selected folder
+    while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
+        log "  Scanning folder: $folder_name"
+        scan_directory_files "$folder_url" "$DOWNLOAD_DESTINATION" "$folder_name"
+    done < "$TEMP_DIR/matches"
+
+    # Calculate total files to download
+    TOTAL_FILES_TO_DOWNLOAD=$((MEDIA_FILES_COUNT + POSTER_FILES_COUNT + SUBTITLE_FILES_COUNT))
+
+    log "Scan completed. Found $TOTAL_FILES_TO_DOWNLOAD files to download."
+}
+
+# Scan files in a directory recursively
+scan_directory_files() {
+    remote_url="$1"
+    local_base="$2"
+    folder_name="$3"
+
+    log "    Scanning: $folder_name"
+
+    href_paths=$(get_href_paths "$remote_url")
+    if [ -z "$href_paths" ]; then
+        log "    No files found in directory"
+        return 0
+    fi
+
+    # Decode folder name for local directory path
+    folder_name_decoded=$(url_decode "$folder_name")
+    local_dir="$local_base/$folder_name_decoded"
+
+    # Get base domain for absolute paths
+    base_domain=$(echo "$BASE_URL" | sed 's|^\(https\?://[^/]*\).*|\1|')
+
+    # Process files and subdirectories
+    temp_dirs="$TEMP_DIR/scan_dirs_$$_$(date +%s)"
+
+    # Create a temporary file to store file processing results
+    temp_files="$TEMP_DIR/files_$$_$(date +%s)"
+
+    printf '%s\n' "$href_paths" | while IFS= read -r link_path; do
+        [ -z "$link_path" ] && continue
+
+        decoded_path=$(url_decode "$link_path")
+
+        # Check if this is a directory
+        is_directory=0
+        case "$decoded_path" in
+            */) is_directory=1 ;;
+        esac
+
+        # Skip external URLs that don't match our domain
+        case "$link_path" in
+            http://*|https://*)
+                if ! echo "$link_path" | grep -q "^$base_domain"; then
+                    continue
+                fi
+                ;;
+        esac
+
+        # Process directories separately
+        if [ "$is_directory" -eq 1 ]; then
+            # Skip navigation directories and current directory
+            case "$link_path" in
+                .|..|./|../|*/_h5ai/*)
+                    continue
+                    ;;
+            esac
+
+            # Also skip based on decoded path
+            case "$decoded_path" in
+                */.|*/..|*/_h5ai/*|.|..)
+                    continue
+                    ;;
+            esac
+
+            subdir_name=$(basename "${decoded_path%/}")
+
+            # Skip if subdirectory name is empty or just whitespace
+            if [ -z "$subdir_name" ] || [ -z "$(echo "$subdir_name" | tr -d '[:space:]')" ]; then
+                continue
+            fi
+
+            # Build subdirectory URL
+            case "$link_path" in
+                http://*|https://*)
+                    subdir_url="$link_path"
+                    ;;
+                /*)
+                    subdir_url="$base_domain${link_path%/}/"
+                    ;;
+                *)
+                    subdir_url="${remote_url%/}/${link_path%/}/"
+                    ;;
+            esac
+
+            # Normalize URL
+            subdir_url=$(echo "$subdir_url" | sed 's|//*/|/|g' | sed 's|^\(https\?:\)\(/\)\+|\1//|')
+
+            # Skip if subdirectory URL is the same as current URL
+            if [ "$subdir_url" = "$remote_url" ] || [ "${subdir_url%/}" = "${remote_url%/}" ]; then
+                continue
+            fi
+
+            # Skip if subdirectory has the same name as current directory
+            if [ "$subdir_name" = "$folder_name_decoded" ] || [ "$subdir_name" = "$folder_name" ]; then
+                continue
+            fi
+
+            printf "%s|%s|%s\n" "$subdir_url" "$local_base" "$subdir_name" >> "$temp_dirs"
+            continue
+        fi
+
+        # Process files
+        if is_supported_extension "$decoded_path"; then
+            filename=$(basename "$decoded_path")
+
+            # Build file URL
+            case "$link_path" in
+                http://*|https://*)
+                    file_url="$link_path"
+                    ;;
+                /*)
+                    file_url="$base_domain$link_path"
+                    ;;
+                *)
+                    file_url="${remote_url%/}/$link_path"
+                    ;;
+            esac
+
+            local_path="$local_dir/$filename"
+
+            # Get file type
+            file_type=$(get_file_type "$filename")
+
+            # Get remote file size
+            remote_size=$(get_remote_file_size "$file_url")
+
+            # Debug: show the local path being checked
+            [ "$QUIET" -eq 0 ] && log "      Checking local path: $local_path"
+
+            # Check if local file exists
+            will_skip=0
+            if [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 0 ]; then
+                local_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+                [ "$QUIET" -eq 0 ] && log "      File exists locally, size: $local_size bytes"
+                if [ "$remote_size" -gt 0 ] && [ "$local_size" -eq "$remote_size" ]; then
+                    [ "$QUIET" -eq 0 ] && log "      File sizes match, will skip"
+                    will_skip=1
+                else
+                    [ "$QUIET" -eq 0 ] && log "      File sizes differ, will download"
+                fi
+            else
+                # Debug: show that file doesn't exist locally
+                [ "$QUIET" -eq 0 ] && log "      File does not exist locally: $local_path"
+            fi
+
+            # Output file processing result to temp file instead of updating counters directly
+            printf "FILE|%s|%s|%d|%s|%s|%s\n" "$file_type" "$will_skip" "$remote_size" "$file_url" "$local_path" "$filename" >> "$temp_files"
+        fi
+    done
+
+    # Process the file results and update counters
+    if [ -f "$temp_files" ]; then
+        while IFS='|' read -r record_type file_type will_skip remote_size file_url local_path filename || [ -n "$record_type" ]; do
+            [ "$record_type" != "FILE" ] && continue
+
+            # Update counters based on file type and skip status
+            case "$file_type" in
+                "media")
+                    if [ "$will_skip" -eq 1 ]; then
+                        MEDIA_SKIPPED_COUNT=$((MEDIA_SKIPPED_COUNT + 1))
+                    else
+                        MEDIA_FILES_COUNT=$((MEDIA_FILES_COUNT + 1))
+                        MEDIA_TOTAL_SIZE=$((MEDIA_TOTAL_SIZE + remote_size))
+                        # Add to download queue if not skipping
+                        printf "DOWNLOAD|%s|%s|%s|%s|%d\n" "$file_url" "$local_path" "$filename" "$file_type" "$remote_size" >> "$DOWNLOAD_QUEUE_FILE"
+                    fi
+                    ;;
+                "poster")
+                    if [ "$will_skip" -eq 1 ]; then
+                        POSTER_SKIPPED_COUNT=$((POSTER_SKIPPED_COUNT + 1))
+                    else
+                        POSTER_FILES_COUNT=$((POSTER_FILES_COUNT + 1))
+                        POSTER_TOTAL_SIZE=$((POSTER_TOTAL_SIZE + remote_size))
+                        # Add to download queue if not skipping
+                        printf "DOWNLOAD|%s|%s|%s|%s|%d\n" "$file_url" "$local_path" "$filename" "$file_type" "$remote_size" >> "$DOWNLOAD_QUEUE_FILE"
+                    fi
+                    ;;
+                "subtitle")
+                    if [ "$will_skip" -eq 1 ]; then
+                        SUBTITLE_SKIPPED_COUNT=$((SUBTITLE_SKIPPED_COUNT + 1))
+                    else
+                        SUBTITLE_FILES_COUNT=$((SUBTITLE_FILES_COUNT + 1))
+                        SUBTITLE_TOTAL_SIZE=$((SUBTITLE_TOTAL_SIZE + remote_size))
+                        # Add to download queue if not skipping
+                        printf "DOWNLOAD|%s|%s|%s|%s|%d\n" "$file_url" "$local_path" "$filename" "$file_type" "$remote_size" >> "$DOWNLOAD_QUEUE_FILE"
+                    fi
+                    ;;
+            esac
+        done < "$temp_files"
+        rm -f "$temp_files"
+    fi
+
+    # Process subdirectories recursively - FIX: Use unique temp file for each level
+    if [ -f "$temp_dirs" ]; then
+        # Create a unique temp file for this level to avoid duplicate processing
+        level_dirs="$TEMP_DIR/level_dirs_$$_$(date +%N)"
+        cp "$temp_dirs" "$level_dirs"
+        rm -f "$temp_dirs"
+
+        while IFS='|' read -r subdir_url subdir_local_base subdir_name || [ -n "$subdir_url" ]; do
+            [ -z "$subdir_url" ] && continue
+            # Check if we've already processed this URL to avoid duplicates
+            if ! grep -q "^$subdir_url|" "$TEMP_DIR/processed_urls" 2>/dev/null; then
+                echo "$subdir_url|$subdir_local_base|$subdir_name" >> "$TEMP_DIR/processed_urls"
+                scan_directory_files "$subdir_url" "$subdir_local_base" "$subdir_name"
+            fi
+        done < "$level_dirs"
+        rm -f "$level_dirs"
+    fi
+}
+
+# Show download summary
+show_download_summary() {
+    printf "\n"
+    printf "========================================\n"
+    printf "      DOWNLOAD SUMMARY\n"
+    printf "========================================\n"
+
+    # Calculate total sizes
+    total_download_size=$((MEDIA_TOTAL_SIZE + POSTER_TOTAL_SIZE + SUBTITLE_TOTAL_SIZE))
+    total_skipped=$((MEDIA_SKIPPED_COUNT + POSTER_SKIPPED_COUNT + SUBTITLE_SKIPPED_COUNT))
+
+    # Show files to download by type
+    printf "Files to download:\n"
+    if [ "$MEDIA_FILES_COUNT" -gt 0 ]; then
+        media_size=$(format_bytes "$MEDIA_TOTAL_SIZE")
+        printf "  Media files:    %3d (%s)\n" "$MEDIA_FILES_COUNT" "$media_size"
+    fi
+
+    if [ "$POSTER_FILES_COUNT" -gt 0 ]; then
+        poster_size=$(format_bytes "$POSTER_TOTAL_SIZE")
+        printf "  Image files:    %3d (%s)\n" "$POSTER_FILES_COUNT" "$poster_size"
+    fi
+
+    if [ "$SUBTITLE_FILES_COUNT" -gt 0 ]; then
+        subtitle_size=$(format_bytes "$SUBTITLE_TOTAL_SIZE")
+        printf "  Subtitle files: %3d (%s)\n" "$SUBTITLE_FILES_COUNT" "$subtitle_size"
+    fi
+
+    # Show files to skip by type
+    if [ "$total_skipped" -gt 0 ]; then
+        printf "\nFiles to skip (already exist):\n"
+        if [ "$MEDIA_SKIPPED_COUNT" -gt 0 ]; then
+            printf "  Media files:    %3d\n" "$MEDIA_SKIPPED_COUNT"
+        fi
+        if [ "$POSTER_SKIPPED_COUNT" -gt 0 ]; then
+            printf "  Image files:    %3d\n" "$POSTER_SKIPPED_COUNT"
+        fi
+        if [ "$SUBTITLE_SKIPPED_COUNT" -gt 0 ]; then
+            printf "  Subtitle files: %3d\n" "$SUBTITLE_SKIPPED_COUNT"
+        fi
+    fi
+
+    # Show totals
+    printf "\nTotal files to download: %d\n" "$TOTAL_FILES_TO_DOWNLOAD"
+    if [ "$total_skipped" -gt 0 ]; then
+        printf "Total files to skip:   %d\n" "$total_skipped"
+    fi
+
+    if [ "$total_download_size" -gt 0 ]; then
+        total_size_formatted=$(format_bytes "$total_download_size")
+        printf "Total download size:   %s\n" "$total_size_formatted"
+
+        # Estimate download time (assuming 1MB/s as conservative estimate)
+        if [ "$total_download_size" -gt 1048576 ]; then
+            estimate_seconds=$((total_download_size / 1048576))
+            if [ "$estimate_seconds" -gt 3600 ]; then
+                estimate_hours=$((estimate_seconds / 3600))
+                estimate_minutes=$(((estimate_seconds % 3600) / 60))
+                printf "Estimated time:        ~%d hours %d minutes (at 1MB/s)\n" "$estimate_hours" "$estimate_minutes"
+            elif [ "$estimate_seconds" -gt 60 ]; then
+                estimate_minutes=$((estimate_seconds / 60))
+                estimate_seconds=$((estimate_seconds % 60))
+                printf "Estimated time:        ~%d minutes %d seconds (at 1MB/s)\n" "$estimate_minutes" "$estimate_seconds"
+            else
+                printf "Estimated time:        ~%d seconds (at 1MB/s)\n" "$estimate_seconds"
+            fi
+        fi
+    fi
+
+    printf "========================================\n"
+}
+
+# Show download progress
+show_download_progress() {
+    current_file="$1"
+    file_size="$2"
+    file_type="$3"
+
+    if [ "$SHOW_PROGRESS" -eq 0 ] || [ "$QUIET" -eq 1 ]; then
+        return 0
+    fi
+
+    # Calculate progress percentage
+    if [ "$TOTAL_FILES_TO_DOWNLOAD" -gt 0 ]; then
+        percentage=$((CURRENT_FILE_NUMBER * 100 / TOTAL_FILES_TO_DOWNLOAD))
+    else
+        percentage=0
+    fi
+
+    # Calculate elapsed time and speed
+    if [ "$START_TIME" -gt 0 ]; then
+        current_time=$(date +%s)
+        elapsed_seconds=$((current_time - START_TIME))
+
+        if [ "$elapsed_seconds" -gt 0 ]; then
+            if [ "$DOWNLOADED_BYTES" -gt 0 ]; then
+                speed_bytes_per_second=$((DOWNLOADED_BYTES / elapsed_seconds))
+                speed_formatted=$(format_bytes "$speed_bytes_per_second")
+                speed_display="$speed_formatted/s"
+            else
+                speed_display="calculating..."
+            fi
+
+            # Estimate remaining time
+            if [ "$CURRENT_FILE_NUMBER" -gt 0 ] && [ "$elapsed_seconds" -gt 0 ]; then
+                avg_time_per_file=$((elapsed_seconds / CURRENT_FILE_NUMBER))
+                remaining_files=$((TOTAL_FILES_TO_DOWNLOAD - CURRENT_FILE_NUMBER))
+                remaining_seconds=$((remaining_files * avg_time_per_file))
+
+                if [ "$remaining_seconds" -gt 3600 ]; then
+                    remaining_hours=$((remaining_seconds / 3600))
+                    remaining_minutes=$(((remaining_seconds % 3600) / 60))
+                    remaining_time="~${remaining_hours}h ${remaining_minutes}m"
+                elif [ "$remaining_seconds" -gt 60 ]; then
+                    remaining_minutes=$((remaining_seconds / 60))
+                    remaining_seconds=$((remaining_seconds % 60))
+                    remaining_time="~${remaining_minutes}m ${remaining_seconds}s"
+                else
+                    remaining_time="~${remaining_seconds}s"
+                fi
+            else
+                remaining_time="calculating..."
+            fi
+        else
+            speed_display="starting..."
+            remaining_time="starting..."
+        fi
+    else
+        speed_display="starting..."
+        remaining_time="starting..."
+    fi
+
+    # Format file size
+    file_size_formatted=$(format_bytes "$file_size")
+
+    # Clear line and show progress
+    printf "\r\033[K"  # Clear line
+    printf "[%s] Progress: %d/%d (%d%%) | %s (%s) | Speed: %s | ETA: %s" \
+           "$(date '+%H:%M:%S')" \
+           "$CURRENT_FILE_NUMBER" \
+           "$TOTAL_FILES_TO_DOWNLOAD" \
+           "$percentage" \
+           "$current_file" \
+           "$file_size_formatted" \
+           "$speed_display" \
+           "$remaining_time"
+
+    # Show progress bar
+    bar_width=30
+    filled=$((percentage * bar_width / 100))
+    empty=$((bar_width - filled))
+    printf " ["
+    i=0
+    while [ "$i" -lt "$filled" ]; do
+        printf "="
+        i=$((i + 1))
+    done
+    while [ "$i" -lt "$bar_width" ]; do
+        printf " "
+        i=$((i + 1))
+    done
+    printf "]"
+
+    # Flush output
+    printf "\n"
+}
+
+# Complete download progress (show final line)
+complete_download_progress() {
+    if [ "$SHOW_PROGRESS" -eq 0 ] || [ "$QUIET" -eq 1 ]; then
+        return 0
+    fi
+
+    printf "\r\033[K"  # Clear line
+    printf "[%s] Download completed! | Downloaded: %d files | Total size: %s\n" \
+           "$(date '+%H:%M:%S')" \
+           "$DOWNLOADED_FILES" \
+           "$(format_bytes "$DOWNLOADED_BYTES")"
+}
+
 # Download a single file with progress
 download_file() {
     file_url="$1"
     local_path="$2"
     filename="$3"
+    file_size="$4"
+    file_type="$5"
 
     local_dir=$(dirname "$local_path")
     mkdir -p "$local_dir" || return 1
@@ -511,6 +990,10 @@ download_file() {
         log "  Overwriting: $filename (force overwrite enabled)"
     fi
 
+    # Show progress for this file
+    CURRENT_FILE_NUMBER=$((CURRENT_FILE_NUMBER + 1))
+    show_download_progress "$filename" "$file_size" "$file_type"
+
     if [ "$QUIET" -eq 0 ]; then
         printf "  Downloading: %s\n" "$filename"
         printf "  URL: %s\n" "$file_url"
@@ -521,6 +1004,15 @@ download_file() {
     [ "$RESUME" -eq 1 ] && curl_opts="$curl_opts --continue-at -"
 
     if curl $curl_opts -o "$local_path" "$file_url"; then
+        # Update downloaded bytes counter
+        if [ "$file_size" -gt 0 ]; then
+            DOWNLOADED_BYTES=$((DOWNLOADED_BYTES + file_size))
+        else
+            # If we don't know the size, get it from the downloaded file
+            downloaded_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+            DOWNLOADED_BYTES=$((DOWNLOADED_BYTES + downloaded_size))
+        fi
+
         DOWNLOADED_FILES=$((DOWNLOADED_FILES + 1))
         return 0
     else
@@ -906,27 +1398,77 @@ main() {
     # Create download directory
     mkdir -p "$DOWNLOAD_DESTINATION" || die "Cannot create download directory: $DOWNLOAD_DESTINATION"
 
-    # Process selected folders
-    log "Processing selected folders..."
-    while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
-        log "Processing folder: $folder_name"
-        log "  URL: $folder_url"
-        log "  Path: $folder_path"
-        log "  DEBUG: Original folder_name='$folder_name'"
-        # Use only the base folder name, not the full path
-        base_folder_name=$(basename "$folder_name")
-        log "  DEBUG: base_folder_name='$base_folder_name'"
-        download_directory_files "$folder_url" "$DOWNLOAD_DESTINATION" "$base_folder_name"
-    done < "$TEMP_DIR/matches"
+    # NEW: Pre-scan and analyze files
+    if [ "$DRY_RUN" -eq 0 ]; then
+        scan_and_analyze_files
+        show_download_summary
+
+        # Ask for confirmation before downloading
+        if [ "$TOTAL_FILES_TO_DOWNLOAD" -gt 0 ]; then
+            printf "\nProceed with download? [y/N]: "
+            read -r confirm
+            case "$confirm" in
+                [Yy]*) ;;
+                *) log "Download cancelled by user."; exit 0 ;;
+            esac
+        else
+            log "No new files to download. All files already exist with same size."
+            exit 0
+        fi
+    fi
+
+    # Initialize download tracking
+    START_TIME=$(date +%s)
+    CURRENT_FILE_NUMBER=0
+    DOWNLOADED_BYTES=0
+    DOWNLOADED_FILES=0
+    SKIPPED_FILES=0
+
+    # NEW: Process download queue if not dry run
+    if [ "$DRY_RUN" -eq 0 ] && [ -f "$DOWNLOAD_QUEUE_FILE" ]; then
+        log "Starting download of $TOTAL_FILES_TO_DOWNLOAD files..."
+
+        # Process download queue
+        while IFS='|' read -r action file_url local_path filename file_type file_size || [ -n "$action" ]; do
+            [ "$action" != "DOWNLOAD" ] && continue
+
+            # Create directory if needed
+            local_dir=$(dirname "$local_path")
+            mkdir -p "$local_dir"
+
+            # Debug output to verify parameters
+            log "DEBUG: Processing download - URL: $file_url, Local: $local_path, Filename: $filename, Type: $file_type, Size: $file_size"
+
+            # Download file with progress tracking
+            download_file "$file_url" "$local_path" "$filename" "$file_size" "$file_type"
+        done < "$DOWNLOAD_QUEUE_FILE"
+
+        # Show final progress
+        complete_download_progress
+    elif [ "$DRY_RUN" -eq 1 ]; then
+        # Original behavior for dry run
+        log "Processing selected folders..."
+        while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
+            log "Processing folder: $folder_name"
+            log "  URL: $folder_url"
+            log "  Path: $folder_path"
+            log "  DEBUG: Original folder_name='$folder_name'"
+            # Use only the base folder name, not the full path
+            base_folder_name=$(basename "$folder_name")
+            log "  DEBUG: base_folder_name='$base_folder_name'"
+            download_directory_files "$folder_url" "$DOWNLOAD_DESTINATION" "$base_folder_name"
+        done < "$TEMP_DIR/matches"
+    fi
 
     # Summary
     if [ "$DRY_RUN" -eq 1 ]; then
         log "Dry run completed. Found $TOTAL_FILES files that would be downloaded."
     else
-        if [ "$SKIPPED_FILES" -gt 0 ]; then
-            log "Download completed. Downloaded $DOWNLOADED_FILES out of $TOTAL_FILES files. Skipped $SKIPPED_FILES files (already exist with same size)."
+        total_skipped=$((MEDIA_SKIPPED_COUNT + POSTER_SKIPPED_COUNT + SUBTITLE_SKIPPED_COUNT))
+        if [ "$total_skipped" -gt 0 ]; then
+            log "Download completed. Downloaded $DOWNLOADED_FILES out of $TOTAL_FILES_TO_DOWNLOAD files. Skipped $total_skipped files (already exist with same size)."
         else
-            log "Download completed. Downloaded $DOWNLOADED_FILES out of $TOTAL_FILES files."
+            log "Download completed. Downloaded $DOWNLOADED_FILES out of $TOTAL_FILES_TO_DOWNLOAD files."
         fi
         log "Files saved to: $DOWNLOAD_DESTINATION"
     fi
