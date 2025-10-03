@@ -720,7 +720,15 @@ scan_and_analyze_files() {
     debug "  Poster files: $POSTER_FILES_COUNT (skipped: $POSTER_SKIPPED_COUNT, filtered: $POSTER_FILTERED_COUNT)"
     debug "  Subtitle files: $SUBTITLE_FILES_COUNT (skipped: $SUBTITLE_SKIPPED_COUNT, filtered: $SUBTITLE_FILTERED_COUNT)"
 
-    log "Scan completed. Found $TOTAL_FILES_TO_DOWNLOAD files to download."
+    # Log filtered files summary
+    total_filtered=$((MEDIA_FILTERED_COUNT + POSTER_FILTERED_COUNT + SUBTITLE_FILTERED_COUNT))
+    if [ "$total_filtered" -gt 0 ]; then
+        log "Scan completed. Found $TOTAL_FILES_TO_DOWNLOAD files to download (filtered out $total_filtered files)."
+        debug "SCAN SUMMARY: $TOTAL_FILES_TO_DOWNLOAD files to download, $total_filtered files filtered"
+    else
+        log "Scan completed. Found $TOTAL_FILES_TO_DOWNLOAD files to download."
+        debug "SCAN SUMMARY: $TOTAL_FILES_TO_DOWNLOAD files to download, no files filtered"
+    fi
 }
 
 # Scan files in a directory recursively
@@ -1036,24 +1044,30 @@ show_download_summary() {
     # Show filtered files by type
     total_filtered=$((MEDIA_FILTERED_COUNT + POSTER_FILTERED_COUNT + SUBTITLE_FILTERED_COUNT))
     if [ "$total_filtered" -gt 0 ]; then
-        printf "\nFiles filtered out (excluded by filters):\n"
+        printf "\n"
+        log "Files filtered out (excluded by filters):"
         if [ "$MEDIA_FILTERED_COUNT" -gt 0 ]; then
-            printf "  Media files:    %3d\n" "$MEDIA_FILTERED_COUNT"
+            log "  Media files:    %3d" "$MEDIA_FILTERED_COUNT"
         fi
         if [ "$POSTER_FILTERED_COUNT" -gt 0 ]; then
-            printf "  Image files:    %3d\n" "$POSTER_FILTERED_COUNT"
+            log "  Image files:    %3d" "$POSTER_FILTERED_COUNT"
         fi
         if [ "$SUBTITLE_FILTERED_COUNT" -gt 0 ]; then
-            printf "  Subtitle files: %3d\n" "$SUBTITLE_FILTERED_COUNT"
+            log "  Subtitle files: %3d" "$SUBTITLE_FILTERED_COUNT"
         fi
 
         # Show active filters
-        printf "\nActive filters:\n"
-        [ "$MIN_FILE_SIZE" -gt 0 ] && printf "  Min size: %s\n" "$(format_bytes "$MIN_FILE_SIZE")"
-        [ "$MAX_FILE_SIZE" -gt 0 ] && printf "  Max size: %s\n" "$(format_bytes "$MAX_FILE_SIZE")"
-        [ -n "$EXCLUDE_EXTENSIONS" ] && printf "  Exclude extensions: %s\n" "$EXCLUDE_EXTENSIONS"
-        [ -n "$EXCLUDE_KEYWORDS" ] && printf "  Exclude keywords: %s\n" "$EXCLUDE_KEYWORDS"
-        [ -n "$EXCLUDE_REGEX" ] && printf "  Exclude regex: %s\n" "$EXCLUDE_REGEX"
+        printf "\n"
+        log "Active filters:"
+        [ "$MIN_FILE_SIZE" -gt 0 ] && log "  Min size: %s" "$(format_bytes "$MIN_FILE_SIZE")"
+        [ "$MAX_FILE_SIZE" -gt 0 ] && log "  Max size: %s" "$(format_bytes "$MAX_FILE_SIZE")"
+        [ -n "$EXCLUDE_EXTENSIONS" ] && log "  Exclude extensions: %s" "$EXCLUDE_EXTENSIONS"
+        [ -n "$EXCLUDE_KEYWORDS" ] && log "  Exclude keywords: %s" "$EXCLUDE_KEYWORDS"
+        [ -n "$EXCLUDE_REGEX" ] && log "  Exclude regex: %s" "$EXCLUDE_REGEX"
+
+        # Also log to debug for more detailed tracking
+        debug "FILTER SUMMARY: Total filtered files: $total_filtered"
+        debug "FILTER SUMMARY: Media filtered: $MEDIA_FILTERED_COUNT, Poster filtered: $POSTER_FILTERED_COUNT, Subtitle filtered: $SUBTITLE_FILTERED_COUNT"
     fi
 
     # Show totals
