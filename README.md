@@ -1,11 +1,11 @@
 # BDIX Downloader (bdixdl)
 
 ![Shell Script](https://img.shields.io/badge/Shell-Script-blue.svg)
-![Version](https://img.shields.io/badge/version-1.0.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.1.0-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![POSIX](https://img.shields.io/badge/POSIX--compatible-brightgreen.svg)
 
-A powerful POSIX-compliant shell script for downloading media files from **h5ai** HTTP directory listings with advanced search, filtering, and progress tracking capabilities.
+A powerful POSIX-compliant shell script for downloading media files from **h5ai** HTTP directory listings with advanced search, filtering, resume capabilities, and comprehensive progress tracking.
 
 ## Features
 
@@ -17,7 +17,8 @@ A powerful POSIX-compliant shell script for downloading media files from **h5ai*
   - **Images**: jpg, jpeg, png, gif, bmp
   - **Subtitles**: srt, sub, ass, vtt
 - **Concurrent Downloads**: Multi-threaded downloading for improved performance
-- **Resume Capability**: Resume interrupted downloads seamlessly
+- **Enhanced Resume Capability**: Intelligent resume with partial download detection
+- **Advanced File Filtering**: Exclude files by size, extension, keywords, or regex patterns
 - **Dry Run Mode**: Preview what would be downloaded without actual downloading
 - **Configurable**: Extensive configuration options via command line or config file
 - **Interactive Selection**: Choose which matching folders to download after search
@@ -28,6 +29,22 @@ A powerful POSIX-compliant shell script for downloading media files from **h5ai*
 - **User Confirmation**: Interactive confirmation before starting downloads
 - **File Type Categorization**: Separate tracking and reporting for media, images, and subtitles
 - **Progress Configuration**: Configurable progress display (can be disabled for cleaner output)
+
+### 🆕 Enhanced Resume Functionality
+- **Intelligent Partial Detection**: Automatically detects partially downloaded files
+- **Byte-Accurate Resume**: Resumes from exact byte position where download stopped
+- **Progress Preservation**: Shows resume progress with percentage completion
+- **Bandwidth Efficient**: Only downloads missing portions, not entire files
+- **Error Recovery**: Handles network interruptions and server issues gracefully
+- **Verification System**: Verifies download completion and file integrity
+
+### 🆕 Advanced Filtering System
+- **Size-Based Filtering**: Exclude files by minimum/maximum size (supports K, M, G, T units)
+- **Extension Filtering**: Exclude specific file extensions (comma-separated)
+- **Keyword Filtering**: Exclude files containing specific keywords in filename
+- **Regex Pattern Filtering**: Advanced pattern matching for complex exclusion rules
+- **Multiple Filter Combinations**: Combine different filter types for precise control
+- **Detailed Reporting**: Shows filtered files and active filters in summary
 
 ## Prerequisites
 
@@ -62,6 +79,11 @@ These are typically available on most Unix-like systems (Linux, macOS, BSD, etc.
    RESUME=1
    QUIET=0
    SHOW_PROGRESS=1
+   # Filtering options
+   MIN_FILE_SIZE=104857600     # 100MB minimum
+   MAX_FILE_SIZE=21474836480    # 20GB maximum
+   EXCLUDE_EXTENSIONS=avi,wmv,flv
+   EXCLUDE_KEYWORDS=sample,trailer,bonus
    EOF
    ```
 
@@ -73,8 +95,8 @@ These are typically available on most Unix-like systems (Linux, macOS, BSD, etc.
 ./down.sh [OPTIONS] BASE_URL KEYWORDS...
 ```
 
-###
-#### Usage
+### Basic Usage
+
 ```bash
 # Search for and download folders containing "movie 2023"
 ./down.sh https://ftp.yourserever.net/media/ "movie 2023"
@@ -83,22 +105,38 @@ These are typically available on most Unix-like systems (Linux, macOS, BSD, etc.
 ./down.sh https://yourserever.com/files/ "documentary nature wildlife"
 ```
 
-#### Usage
+### Advanced Usage
+
 ```bash
-# Dry run to see what would be downloaded
-./down.sh -n https://ftp.yourserever.net/media/ "action movies"
+# Enhanced resume with progress tracking
+./down.sh -r --debug https://media.yourserever.com/ "4k movies"
+
+# Size-based filtering - exclude files larger than 2GB
+./down.sh --max-size 2G https://yourserever.com/media/ "movies"
+
+# Multiple filters - exclude small files and specific extensions
+./down.sh --min-size 100M --exclude-ext avi,wmv,flv https://yourserever.com/media/ "videos"
+
+# Keyword filtering - exclude samples and trailers
+./down.sh --exclude-keywords "sample,trailer,bonus" https://yourserever.com/media/ "movies"
+
+# Advanced regex filtering
+./down.sh --exclude-regex ".*[Ss]ample.*|.*[Tt]railer.*" https://yourserever.com/media/ "videos"
+
+# Dry run to see what would be downloaded (including filtered files)
+./down.sh -n --max-size 1G --exclude-ext avi https://ftp.yourserever.net/media/ "action movies"
 
 # Custom download destination and search depth
 ./down.sh -d ~/Downloads -D 3 https://media.yourserever.com/ "tv series"
 
-# Multi-threaded downloading with resume capability
-./down.sh -t 5 -r https://cdn.yourserever.com/ "4k movies"
+# Multi-threaded downloading with resume and filtering
+./down.sh -t 5 -r --max-size 5G --exclude-keywords "sample,trailer" https://cdn.yourserever.com/ "4k movies"
 
-# Quiet mode for automated scripts
+# Quiet mode for automated scripts with custom config
 ./down.sh -q -c ~/.config/bdixdl.conf https://files.yourserever.net/ "backup"
 ```
 
-### Line Options
+## Command Line Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -106,14 +144,49 @@ These are typically available on most Unix-like systems (Linux, macOS, BSD, etc.
 | `-D, --depth NUM` | Maximum search depth | `5` |
 | `-t, --threads NUM` | Concurrent download threads | `3` |
 | `-n, --dry-run` | Show what would be downloaded without downloading | Disabled |
-| `-r, --resume` | Resume interrupted downloads | Disabled |
+| `-r, --resume` | Resume interrupted downloads (auto-detects partial files) | Disabled |
 | `-f, --force-overwrite` | Force overwrite existing files | Disabled |
+| `--min-size SIZE` | Exclude files smaller than SIZE (e.g., 100M, 2G, 500K) | No limit |
+| `--max-size SIZE` | Exclude files larger than SIZE (e.g., 10G, 500M, 1T) | No limit |
+| `--exclude-ext EXTS` | Exclude files with these extensions (comma-separated) | None |
+| `--exclude-keywords WORDS` | Exclude files containing these keywords (comma-separated) | None |
+| `--exclude-regex PATTERN` | Exclude files matching this regex pattern | None |
+| `--debug` | Show debug information (verbose logging) | Disabled |
 | `-q, --quiet` | Suppress non-error output | Disabled |
 | `-c, --config FILE` | Use custom config file | `$HOME/.config/bdixdl.conf` |
 | `-h, --help` | Show help message | - |
 | `-v, --version` | Show version information | - |
 
-### Configuration File
+### Size Format Examples
+
+```bash
+--min-size 100M     # 100 Megabytes
+--max-size 2G       # 2 Gigabytes
+--min-size 500K     # 500 Kilobytes
+--max-size 1T       # 1 Terabyte
+--max-size 1048576  # Exact bytes
+```
+
+### Filtering Examples
+
+```bash
+# Filter by file size
+./down.sh --min-size 50M --max-size 2G https://yourserever.com/media/ "movies"
+
+# Filter by extensions
+./down.sh --exclude-ext "avi,wmv,flv,mov" https://yourserever.com/media/ "videos"
+
+# Filter by keywords
+./down.sh --exclude-keywords "sample,trailer,bonus,behind-the-scenes" https://yourserever.com/media/ "movies"
+
+# Complex regex filtering
+./down.sh --exclude-regex ".*[Ss]ample.*|.*[Tt]railer.*|.*[Bb]onus.*" https://yourserever.com/media/ "videos"
+
+# Combine multiple filters
+./down.sh --min-size 100M --max-size 5G --exclude-ext "avi,wmv" --exclude-keywords "sample,trailer" https://yourserever.com/media/ "movies"
+```
+
+## Configuration File
 
 Create a configuration file at `~/.config/bdixdl.conf` (or specify custom path with `-c`):
 
@@ -135,6 +208,21 @@ QUIET=0
 
 # Show detailed progress display (1=enabled, 0=disabled)
 SHOW_PROGRESS=1
+
+# === ADVANCED FILTERING OPTIONS ===
+
+# Size-based filtering (in bytes)
+MIN_FILE_SIZE=104857600     # 100MB minimum file size
+MAX_FILE_SIZE=21474836480    # 20GB maximum file size
+
+# Extension-based filtering (comma-separated, lowercase)
+EXCLUDE_EXTENSIONS=avi,wmv,flv,mov
+
+# Keyword-based filtering (comma-separated, case-insensitive)
+EXCLUDE_KEYWORDS=sample,trailer,bonus,behind the scenes
+
+# Regex pattern filtering (advanced)
+EXCLUDE_REGEX=.*[Ss]ample.*|.*[Tt]railer.*|.*[Bb]onus.*
 ```
 
 ## Workflow
@@ -143,17 +231,97 @@ SHOW_PROGRESS=1
 2. **Selection Phase**: Interactive selection of which folders to download (skip in dry-run mode)
 3. **Pre-scan Analysis**: Comprehensive analysis of all files in selected folders
    - Checks existing files and sizes
+   - Applies filtering rules to exclude unwanted files
    - Categorizes files by type (media, images, subtitles)
    - Builds download queue with all file information
 4. **Summary Display**: Shows detailed download summary including:
    - File counts and sizes by type
    - Files to skip (already exist)
+   - 🆕 Files filtered out (excluded by filters)
+   - Active filters being applied
    - Total download size and estimated time
 5. **User Confirmation**: Interactive confirmation before starting downloads
 6. **Download Phase**: Downloads files with real-time progress tracking
+   - 🆕 Intelligent resume for partial downloads
    - Shows current file, progress percentage, speed, and ETA
    - Visual progress bar
    - File-by-file progress updates
+
+## Enhanced Resume Functionality
+
+The script now includes sophisticated resume capabilities that handle interrupted downloads intelligently:
+
+### How Resume Works
+1. **Detection**: Automatically detects partial downloads by comparing local vs remote file sizes
+2. **Analysis**: Determines if a file is complete, partial, or corrupted
+3. **Decision**: Decides whether to skip, resume, or restart based on file state and settings
+4. **Execution**: Resumes from exact byte position or restarts as needed
+5. **Verification**: Confirms download completion and file integrity
+
+### Resume Behavior
+- **Complete Files**: Skipped with message "already exists"
+- **Partial Files**: Resume from last byte position (shows percentage complete)
+- **Corrupted Files**: Restart download (shows "larger than expected" message)
+- **Size Unknown**: Attempts resume if local file exists
+- **Force Overwrite**: Always restarts regardless of file state
+
+### Example Resume Output
+```
+[12:25:55]   ↻ Movie.mkv (resuming at 75% - 2.5GB/3.5GB)
+[DEBUG]   RESUME: Partial file found, downloading remaining 1.0GB bytes
+[DEBUG]   Resuming from byte position: 2684354560
+```
+
+## Filtering System
+
+The comprehensive filtering system allows precise control over which files are downloaded:
+
+### Filter Types
+
+#### Size-Based Filtering
+```bash
+--min-size 100M    # Exclude files smaller than 100MB
+--max-size 5G      # Exclude files larger than 5GB
+```
+
+#### Extension Filtering
+```bash
+--exclude-ext "avi,wmv,flv"    # Exclude these file extensions
+--exclude-ext "mov,mp4"        # Exclude these video formats
+```
+
+#### Keyword Filtering
+```bash
+--exclude-keywords "sample,trailer"    # Exclude files with these keywords
+--exclude-keywords "bonus,extra"       # Case-insensitive keyword matching
+```
+
+#### Regex Pattern Filtering
+```bash
+--exclude-regex ".*[Ss]ample.*"                    # Files containing "sample" (any case)
+--exclude-regex ".*[0-9]{4}.*"                     # Files with 4-digit numbers
+--exclude-regex ".*\.(avi|wmv|flv)$"               # Alternative to extension filtering
+```
+
+### Filter Priority and Combination
+1. All filters are applied **AND** (file must pass ALL filters to be included)
+2. Filters are applied during the scan phase before download queue creation
+3. Filtered files are excluded from download queue entirely
+4. Multiple filters of the same type are combined with **OR** logic
+
+### Filter Reporting
+```
+Files filtered out (excluded by filters):
+  Media files:    15
+  Image files:     3
+  Subtitle files:  2
+
+Active filters:
+  Min size: 100.0 MB
+  Max size: 5.0 GB
+  Exclude extensions: avi,wmv,flv
+  Exclude keywords: sample,trailer
+```
 
 ## How It Works
 
@@ -165,6 +333,7 @@ SHOW_PROGRESS=1
 
 ### Pre-scan Analysis
 - Recursively scans all selected folders before downloading
+- Applies all filtering rules to exclude unwanted files
 - Checks for existing files and compares sizes to avoid duplicates
 - Categorizes files by type (media, images, subtitles)
 - Builds comprehensive download queue with metadata
@@ -173,9 +342,18 @@ SHOW_PROGRESS=1
 ### Smart Filtering
 - Only downloads files with supported extensions
 - Automatically skips existing files with matching sizes
-- Detects incomplete downloads and offers to resume/replace
+- Detects incomplete downloads and offers intelligent resume/restart
 - Validates file extensions before download attempts
-- Provides detailed file type statistics
+- Applies user-defined filters during scan phase
+- Provides detailed file type and filtering statistics
+
+### Enhanced Resume System
+- Intelligent detection of partial vs complete downloads
+- Byte-accurate resume from exact interruption point
+- Progress preservation across script restarts
+- Bandwidth-efficient partial downloads
+- Verification of download completion and integrity
+- Detailed logging of resume decisions and actions
 
 ### Progress Tracking
 - Real-time progress display with file-by-file updates
@@ -183,39 +361,77 @@ SHOW_PROGRESS=1
 - Visual progress bar with percentage completion
 - Separate tracking for each file type category
 - Configurable progress display (can be disabled)
+- Enhanced logging for debugging and monitoring
 
 ### Management
 - Supports concurrent downloads with configurable thread count
-- Implements resume functionality for interrupted transfers
+- Implements intelligent resume functionality for interrupted transfers
 - Provides detailed progress logging and error reporting
 - Creates local directory structure matching remote organization
 - User confirmation before starting downloads
+- Comprehensive filtering system for selective downloading
 
 ## Troubleshooting
 
-### Issues
+### Common Issues
 
 **No folders found matching keywords**
 - Check if the BASE_URL is accessible in a web browser
 - Verify the **h5ai** directory listing is working
 - Try broader keywords or reduce search depth
+- Use `--debug` flag to see detailed search progress
 
 **Download failures**
 - Ensure you have write permissions in the destination directory
 - Check network connectivity to the target server
 - Verify the server supports HTTP range requests for resume functionality
+- Try with `--force-overwrite` if files are corrupted
+
+**Resume not working**
+- Check if server supports HTTP range requests (try `curl -I <file-url>`)
+- Use `--debug` flag to see resume decision process
+- Verify local file is actually partial (smaller than remote)
+- Some servers may not support resume for certain file types
+
+**Files being filtered unexpectedly**
+- Check active filters in the download summary
+- Use `--debug` to see which filters are excluding files
+- Verify filter syntax (especially regex patterns)
+- Check for case sensitivity in keyword filters
 
 **Permission denied errors**
 - Make sure the script is executable: `chmod +x down.sh`
 - Check write permissions in the download directory
 - Verify you have network access to the target server
+- Ensure destination directory exists or can be created
 
-### Mode
+### Debug Mode
 
-For detailed debugging information, run without quiet mode:
+For detailed debugging information, use the `--debug` flag:
 ```bash
-./down.sh https://example.com/media/ "keywords"
+./down.sh --debug -r https://yourserever.com/media/ "keywords"
 ```
+
+Debug output shows:
+- Search progress and folder discovery
+- Filter decisions and excluded files
+- Resume analysis and decisions
+- File-by-file download progress
+- Network error details
+
+### Resume Troubleshooting
+
+**Files restarting instead of resuming:**
+- Check debug output for resume decisions
+- Verify server supports HTTP range requests
+- Ensure local file is smaller than remote file
+- Check if `--resume` flag is enabled
+
+**Files not completing after resume:**
+- May indicate server timeout or connection issues
+- Try with increased timeout or single-threaded downloads
+- Check if server has download limits or restrictions
+- Use `--force-overwrite` to restart corrupted downloads
 
 ## Contributing
 
@@ -227,8 +443,9 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 2. **Error Handling**: Implement robust error handling for all operations
 3. **Testing**: Test thoroughly across different h5ai server configurations
 4. **Documentation**: Update documentation for new features or changes
+5. **Filter Testing**: Test filtering combinations with various file types and sizes
 
-### Changes
+### Development Workflow
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -245,18 +462,32 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **h5ai**: For the excellent HTTP directory indexer that this script works with
 - **POSIX Standard**: For providing a consistent shell scripting environment
 - **Curl & Wget**: For robust HTTP client functionality
+- **BDIX Community**: For inspiration and feedback on features
 
 ## Support
 
 If you encounter any issues or have questions:
 
-1. Check the [Troubleshooting](#-troubleshooting) section
+1. Check the [Troubleshooting](#troubleshooting) section
 2. Search existing [Issues](https://github.com/rajwanur/bdixdl/issues)
-3. Create a new issue with detailed information about your problem
+3. Create a new issue with detailed information including:
+   - Exact command used
+   - Debug output (`--debug` flag)
+   - Server type and configuration
+   - Expected vs actual behavior
 
 ## Version History
 
-### 1.0.0
+### v1.1.0 (Latest)
+- **Enhanced Resume Functionality**: Intelligent partial download detection and byte-accurate resume
+- **Advanced Filtering System**: Size, extension, keyword, and regex filtering
+- **Improved Debug Logging**: Comprehensive logging for troubleshooting
+- **Fixed Duplicate Download Issues**: Resolved files being processed multiple times
+- **Enhanced Queue Processing**: Better handling of download queue and file tracking
+- **Improved Error Handling**: Better network error detection and recovery
+- **Updated Documentation**: Comprehensive documentation for new features
+
+### v1.0.0
 - Initial release
 - Complete rewrite with improved h5ai compatibility
 - Added support for multiple h5ai implementations

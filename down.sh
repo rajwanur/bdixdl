@@ -3,7 +3,7 @@
 # bdixdl - POSIX-compliant H5AI media downloader
 # Downloads media files from h5ai HTTP directory listings with advanced features
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 SCRIPT_NAME="bdixdl"
 
 # --- Default Configuration ---
@@ -53,6 +53,13 @@ START_TIME=0
 DOWNLOADED_BYTES=0
 SHOW_PROGRESS=1  # 1=show detailed progress, 0=simple progress
 
+# File filtering options
+MIN_FILE_SIZE=0          # Minimum file size in bytes (0 = no minimum)
+MAX_FILE_SIZE=0          # Maximum file size in bytes (0 = no maximum)
+EXCLUDE_EXTENSIONS=""    # Comma-separated list of extensions to exclude
+EXCLUDE_KEYWORDS=""      # Comma-separated list of keywords to exclude from filenames
+EXCLUDE_REGEX=""         # Regular expression pattern to exclude from filenames
+
 # --- Utility Functions ---
 
 log() {
@@ -99,6 +106,11 @@ OPTIONS:
     -n, --dry-run          Show what would be downloaded without downloading
     -r, --resume           Resume interrupted downloads (automatically detects partial files and continues from where left off)
     -f, --force-overwrite  Force overwrite existing files (skip if same size by default)
+    --min-size SIZE        Exclude files smaller than SIZE (e.g., 100M, 2G, 500K)
+    --max-size SIZE        Exclude files larger than SIZE (e.g., 10G, 500M, 1T)
+    --exclude-ext EXTS     Exclude files with these extensions (comma-separated, e.g., avi,wmv,flv)
+    --exclude-keywords WORDS Exclude files containing these keywords in filename (comma-separated)
+    --exclude-regex PATTERN Exclude files matching this regex pattern
     -q, --quiet            Suppress non-error output
     --debug                Show debug information (verbose logging)
     -c, --config FILE      Use custom config file (default: $DEFAULT_CONFIG_FILE)
@@ -120,6 +132,12 @@ EXAMPLES:
     $SCRIPT_NAME https://ftp.yourserever.net/media/ "movie 2023"
     $SCRIPT_NAME -n -t 5 https://yourserever.com/files/ "documentary nature"
     $SCRIPT_NAME --dry-run --depth 3 http://192.168.1.1/media/ "series season"
+
+    # Filter examples:
+    $SCRIPT_NAME --max-size 2G https://server.com/media/ "movies"  # Exclude files larger than 2GB
+    $SCRIPT_NAME --min-size 100M --exclude-ext avi,wmv https://server.com/media/ "videos"
+    $SCRIPT_NAME --exclude-keywords "sample,trailer,bonus" https://server.com/media/ "movies"
+    $SCRIPT_NAME --exclude-regex ".*[Ss]ample.*|.*[Tt]railer.*" https://server.com/media/ "videos"
 
 SUPPORTED FILE TYPES:
     Media: $MEDIA_EXTENSIONS
@@ -169,6 +187,11 @@ load_config() {
             QUIET) QUIET="$value" ;;
             DEBUG) DEBUG="$value" ;;
             SHOW_PROGRESS) SHOW_PROGRESS="$value" ;;
+            MIN_FILE_SIZE) MIN_FILE_SIZE="$value" ;;
+            MAX_FILE_SIZE) MAX_FILE_SIZE="$value" ;;
+            EXCLUDE_EXTENSIONS) EXCLUDE_EXTENSIONS="$value" ;;
+            EXCLUDE_KEYWORDS) EXCLUDE_KEYWORDS="$value" ;;
+            EXCLUDE_REGEX) EXCLUDE_REGEX="$value" ;;
         esac
     done < "$CONFIG_FILE"
 }
@@ -190,6 +213,123 @@ format_bytes() {
     else
         printf "%.1f GB" "$(echo "$bytes 1073741824" | awk '{printf $1/$2}')"
     fi
+}
+
+# Parse size string (e.g., "100M", "2G", "500K") to bytes
+parse_size() {
+    size_str="$1"
+
+    # Remove whitespace and convert to lowercase
+    size_str=$(echo "$size_str" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+
+    # Extract number and unit
+    number=$(echo "$size_str" | sed 's/[^0-9.]//g')
+    unit=$(echo "$size_str" | sed 's/[0-9.]//g')
+
+    # Default to bytes if no unit
+    case "$unit" in
+        ""|b)
+            multiplier=1
+            ;;
+        k|kb)
+            multiplier=1024
+            ;;
+        m|mb)
+            multiplier=1048576
+            ;;
+        g|gb)
+            multiplier=1073741824
+            ;;
+        t|tb)
+            multiplier=1099511627776
+            ;;
+        *)
+            debug "parse_size: Unknown unit '$unit', treating as bytes"
+            multiplier=1
+            ;;
+    esac
+
+    # Calculate bytes
+    bytes=$(echo "$number $multiplier" | awk '{printf "%.0f", $1 * $2}')
+    printf '%s\n' "$bytes"
+}
+
+# Check if file should be excluded based on filters
+should_exclude_file() {
+    filename="$1"
+    file_size="$2"
+
+    # Skip filtering if no filters are set
+    if [ "$MIN_FILE_SIZE" -eq 0 ] && [ "$MAX_FILE_SIZE" -eq 0 ] && \
+       [ -z "$EXCLUDE_EXTENSIONS" ] && [ -z "$EXCLUDE_KEYWORDS" ] && [ -z "$EXCLUDE_REGEX" ]; then
+        return 1  # Don't exclude
+    fi
+
+    # Size-based filtering
+    if [ "$MIN_FILE_SIZE" -gt 0 ] && [ "$file_size" -gt 0 ] && [ "$file_size" -lt "$MIN_FILE_SIZE" ]; then
+        debug "    FILTER: File too small ($(format_bytes "$file_size") < $(format_bytes "$MIN_FILE_SIZE"))"
+        return 0  # Exclude
+    fi
+
+    if [ "$MAX_FILE_SIZE" -gt 0 ] && [ "$file_size" -gt 0 ] && [ "$file_size" -gt "$MAX_FILE_SIZE" ]; then
+        debug "    FILTER: File too large ($(format_bytes "$file_size") > $(format_bytes "$MAX_FILE_SIZE"))"
+        return 0  # Exclude
+    fi
+
+    # Extension-based filtering
+    if [ -n "$EXCLUDE_EXTENSIONS" ]; then
+        # Extract extension and convert to lowercase
+        case "$filename" in
+            *.*)
+                ext=$(printf '%s' "$filename" | sed 's/.*\.//' | tr '[:upper:]' '[:lower:]')
+                ;;
+            *)
+                ext=""
+                ;;
+        esac
+
+        old_ifs="$IFS"
+        IFS=','
+        for exclude_ext in $EXCLUDE_EXTENSIONS; do
+            exclude_ext=$(printf '%s' "$exclude_ext" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+            if [ "$ext" = "$exclude_ext" ]; then
+                IFS="$old_ifs"
+                debug "    FILTER: Extension excluded ($ext)"
+                return 0  # Exclude
+            fi
+        done
+        IFS="$old_ifs"
+    fi
+
+    # Keyword-based filtering
+    if [ -n "$EXCLUDE_KEYWORDS" ]; then
+        filename_lower=$(printf '%s' "$filename" | tr '[:upper:]' '[:lower:]')
+
+        old_ifs="$IFS"
+        IFS=','
+        for keyword in $EXCLUDE_KEYWORDS; do
+            keyword=$(printf '%s' "$keyword" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+            case "$filename_lower" in
+                *"$keyword"*)
+                    IFS="$old_ifs"
+                    debug "    FILTER: Keyword excluded ($keyword)"
+                    return 0  # Exclude
+                    ;;
+            esac
+        done
+        IFS="$old_ifs"
+    fi
+
+    # Regex-based filtering
+    if [ -n "$EXCLUDE_REGEX" ]; then
+        if echo "$filename" | grep -q -E "$EXCLUDE_REGEX"; then
+            debug "    FILTER: Regex pattern matched ($EXCLUDE_REGEX)"
+            return 0  # Exclude
+        fi
+    fi
+
+    # Passes all filters
+    return 1  # Don't exclude
 }
 
 # Get file type category
@@ -554,6 +694,9 @@ scan_and_analyze_files() {
     MEDIA_SKIPPED_COUNT=0
     POSTER_SKIPPED_COUNT=0
     SUBTITLE_SKIPPED_COUNT=0
+    MEDIA_FILTERED_COUNT=0
+    POSTER_FILTERED_COUNT=0
+    SUBTITLE_FILTERED_COUNT=0
 
     DOWNLOAD_QUEUE_FILE="$TEMP_DIR/download_queue_$$.txt"
     debug "=== SCAN PHASE START ==="
@@ -573,9 +716,9 @@ scan_and_analyze_files() {
 
     debug "=== SCAN PHASE COMPLETE ==="
     debug "  Total files in download queue: $(wc -l < "$DOWNLOAD_QUEUE_FILE" 2>/dev/null || echo '0')"
-    debug "  Media files: $MEDIA_FILES_COUNT (skipped: $MEDIA_SKIPPED_COUNT)"
-    debug "  Poster files: $POSTER_FILES_COUNT (skipped: $POSTER_SKIPPED_COUNT)"
-    debug "  Subtitle files: $SUBTITLE_FILES_COUNT (skipped: $SUBTITLE_SKIPPED_COUNT)"
+    debug "  Media files: $MEDIA_FILES_COUNT (skipped: $MEDIA_SKIPPED_COUNT, filtered: $MEDIA_FILTERED_COUNT)"
+    debug "  Poster files: $POSTER_FILES_COUNT (skipped: $POSTER_SKIPPED_COUNT, filtered: $POSTER_FILTERED_COUNT)"
+    debug "  Subtitle files: $SUBTITLE_FILES_COUNT (skipped: $SUBTITLE_SKIPPED_COUNT, filtered: $SUBTITLE_FILTERED_COUNT)"
 
     log "Scan completed. Found $TOTAL_FILES_TO_DOWNLOAD files to download."
 }
@@ -708,6 +851,24 @@ scan_directory_files() {
 
             # Get remote file size
             remote_size=$(get_remote_file_size "$file_url")
+
+            # Apply filters - check if file should be excluded
+            if should_exclude_file "$filename" "$remote_size"; then
+                debug "      EXCLUDED: $filename ($(format_bytes "$remote_size")) - filtered out"
+                # Update filtered counters based on file type
+                case "$file_type" in
+                    "media")
+                        MEDIA_FILTERED_COUNT=$((MEDIA_FILTERED_COUNT + 1))
+                        ;;
+                    "poster")
+                        POSTER_FILTERED_COUNT=$((POSTER_FILTERED_COUNT + 1))
+                        ;;
+                    "subtitle")
+                        SUBTITLE_FILTERED_COUNT=$((SUBTITLE_FILTERED_COUNT + 1))
+                        ;;
+                esac
+                continue
+            fi
 
             # Debug: show the local path being checked
             debug "      Checking local path: $local_path"
@@ -870,6 +1031,29 @@ show_download_summary() {
         if [ "$SUBTITLE_SKIPPED_COUNT" -gt 0 ]; then
             printf "  Subtitle files: %3d\n" "$SUBTITLE_SKIPPED_COUNT"
         fi
+    fi
+
+    # Show filtered files by type
+    total_filtered=$((MEDIA_FILTERED_COUNT + POSTER_FILTERED_COUNT + SUBTITLE_FILTERED_COUNT))
+    if [ "$total_filtered" -gt 0 ]; then
+        printf "\nFiles filtered out (excluded by filters):\n"
+        if [ "$MEDIA_FILTERED_COUNT" -gt 0 ]; then
+            printf "  Media files:    %3d\n" "$MEDIA_FILTERED_COUNT"
+        fi
+        if [ "$POSTER_FILTERED_COUNT" -gt 0 ]; then
+            printf "  Image files:    %3d\n" "$POSTER_FILTERED_COUNT"
+        fi
+        if [ "$SUBTITLE_FILTERED_COUNT" -gt 0 ]; then
+            printf "  Subtitle files: %3d\n" "$SUBTITLE_FILTERED_COUNT"
+        fi
+
+        # Show active filters
+        printf "\nActive filters:\n"
+        [ "$MIN_FILE_SIZE" -gt 0 ] && printf "  Min size: %s\n" "$(format_bytes "$MIN_FILE_SIZE")"
+        [ "$MAX_FILE_SIZE" -gt 0 ] && printf "  Max size: %s\n" "$(format_bytes "$MAX_FILE_SIZE")"
+        [ -n "$EXCLUDE_EXTENSIONS" ] && printf "  Exclude extensions: %s\n" "$EXCLUDE_EXTENSIONS"
+        [ -n "$EXCLUDE_KEYWORDS" ] && printf "  Exclude keywords: %s\n" "$EXCLUDE_KEYWORDS"
+        [ -n "$EXCLUDE_REGEX" ] && printf "  Exclude regex: %s\n" "$EXCLUDE_REGEX"
     fi
 
     # Show totals
@@ -1410,6 +1594,31 @@ parse_arguments() {
             --debug)
                 DEBUG=1
                 shift
+                ;;
+            --min-size)
+                [ -z "$2" ] && die "Option $1 requires an argument"
+                MIN_FILE_SIZE=$(parse_size "$2")
+                shift 2
+                ;;
+            --max-size)
+                [ -z "$2" ] && die "Option $1 requires an argument"
+                MAX_FILE_SIZE=$(parse_size "$2")
+                shift 2
+                ;;
+            --exclude-ext)
+                [ -z "$2" ] && die "Option $1 requires an argument"
+                EXCLUDE_EXTENSIONS="$2"
+                shift 2
+                ;;
+            --exclude-keywords)
+                [ -z "$2" ] && die "Option $1 requires an argument"
+                EXCLUDE_KEYWORDS="$2"
+                shift 2
+                ;;
+            --exclude-regex)
+                [ -z "$2" ] && die "Option $1 requires an argument"
+                EXCLUDE_REGEX="$2"
+                shift 2
                 ;;
             -c|--config)
                 [ -z "$2" ] && die "Option $1 requires an argument"
