@@ -97,7 +97,7 @@ OPTIONS:
     -D, --depth NUM         Maximum search depth (default: $DEFAULT_MAX_DEPTH)
     -t, --threads NUM       Concurrent download threads (default: $DEFAULT_THREADS)
     -n, --dry-run          Show what would be downloaded without downloading
-    -r, --resume           Resume interrupted downloads
+    -r, --resume           Resume interrupted downloads (automatically detects partial files and continues from where left off)
     -f, --force-overwrite  Force overwrite existing files (skip if same size by default)
     -q, --quiet            Suppress non-error output
     --debug                Show debug information (verbose logging)
@@ -556,6 +556,8 @@ scan_and_analyze_files() {
     SUBTITLE_SKIPPED_COUNT=0
 
     DOWNLOAD_QUEUE_FILE="$TEMP_DIR/download_queue_$$.txt"
+    debug "=== SCAN PHASE START ==="
+    debug "  Download queue file: $DOWNLOAD_QUEUE_FILE"
 
     # Initialize processed URLs tracking file to prevent duplicate processing
     > "$TEMP_DIR/processed_urls"
@@ -568,6 +570,12 @@ scan_and_analyze_files() {
 
     # Calculate total files to download
     TOTAL_FILES_TO_DOWNLOAD=$((MEDIA_FILES_COUNT + POSTER_FILES_COUNT + SUBTITLE_FILES_COUNT))
+
+    debug "=== SCAN PHASE COMPLETE ==="
+    debug "  Total files in download queue: $(wc -l < "$DOWNLOAD_QUEUE_FILE" 2>/dev/null || echo '0')"
+    debug "  Media files: $MEDIA_FILES_COUNT (skipped: $MEDIA_SKIPPED_COUNT)"
+    debug "  Poster files: $POSTER_FILES_COUNT (skipped: $POSTER_SKIPPED_COUNT)"
+    debug "  Subtitle files: $SUBTITLE_FILES_COUNT (skipped: $SUBTITLE_SKIPPED_COUNT)"
 
     log "Scan completed. Found $TOTAL_FILES_TO_DOWNLOAD files to download."
 }
@@ -592,6 +600,10 @@ scan_directory_files() {
 
     # Get base domain for absolute paths
     base_domain=$(echo "$BASE_URL" | sed 's|^\(https\?://[^/]*\).*|\1|')
+
+    # Create a processed files tracker to prevent duplicates
+    PROCESSED_FILES_TRACKER="$TEMP_DIR/processed_files_$$.txt"
+    [ -f "$PROCESSED_FILES_TRACKER" ] || > "$PROCESSED_FILES_TRACKER"
 
     # Process files and subdirectories
     temp_dirs="$TEMP_DIR/scan_dirs_$$_$(date +%s)"
@@ -700,21 +712,41 @@ scan_directory_files() {
             # Debug: show the local path being checked
             debug "      Checking local path: $local_path"
 
-            # Check if local file exists
+            # Enhanced file existence and size checking
             will_skip=0
             if [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 0 ]; then
                 local_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
                 debug "      File exists locally, size: $local_size bytes"
-                if [ "$remote_size" -gt 0 ] && [ "$local_size" -eq "$remote_size" ]; then
-                    debug "      File sizes match, will skip"
-                    will_skip=1
+
+                if [ "$remote_size" -gt 0 ]; then
+                    if [ "$local_size" -eq "$remote_size" ]; then
+                        debug "      File sizes match, will skip"
+                        will_skip=1
+                    elif [ "$local_size" -gt "$remote_size" ]; then
+                        debug "      Local file larger than remote, will restart"
+                        debug "      Local: $local_size, Remote: $remote_size"
+                    else
+                        debug "      File is incomplete, will download"
+                        debug "      Local: $local_size, Remote: $remote_size, Missing: $((remote_size - local_size))"
+                    fi
                 else
-                    debug "      File sizes differ, will download"
+                    debug "      Remote size unknown, will check again during download"
                 fi
             else
                 # Debug: show that file doesn't exist locally
                 debug "      File does not exist locally: $local_path"
             fi
+
+            # Check for duplicates before processing
+            file_key="$file_url|$local_path|$filename"
+            if grep -q "^$file_key$" "$PROCESSED_FILES_TRACKER" 2>/dev/null; then
+                debug "      DUPLICATE: File already processed, skipping: $filename"
+                continue
+            fi
+
+            # Mark this file as processed
+            echo "$file_key" >> "$PROCESSED_FILES_TRACKER"
+            debug "      TRACKING: Added file to tracker: $filename"
 
             # Output file processing result to temp file instead of updating counters directly
             printf "FILE|%s|%s|%d|%s|%s|%s\n" "$file_type" "$will_skip" "$remote_size" "$file_url" "$local_path" "$filename" >> "$temp_files"
@@ -788,6 +820,22 @@ show_download_summary() {
     printf "========================================\n"
     printf "      DOWNLOAD SUMMARY\n"
     printf "========================================\n"
+
+    # Check for duplicate entries in download queue
+    if [ -f "$DOWNLOAD_QUEUE_FILE" ]; then
+        total_lines=$(wc -l < "$DOWNLOAD_QUEUE_FILE" 2>/dev/null || echo '0')
+        unique_lines=$(cut -d'|' -f2 "$DOWNLOAD_QUEUE_FILE" | sort -u | wc -l 2>/dev/null || echo '0')
+
+        if [ "$total_lines" -ne "$unique_lines" ]; then
+            debug "DUPLICATE WARNING: Found duplicate entries in download queue!"
+            debug "  Total entries: $total_lines"
+            debug "  Unique entries: $unique_lines"
+            debug "  Duplicates: $((total_lines - unique_lines))"
+        else
+            debug "QUEUE VERIFICATION: No duplicate entries found in download queue"
+            debug "  Total entries: $total_lines"
+        fi
+    fi
 
     # Calculate total sizes
     total_download_size=$((MEDIA_TOTAL_SIZE + POSTER_TOTAL_SIZE + SUBTITLE_TOTAL_SIZE))
@@ -972,30 +1020,66 @@ download_file() {
     local_dir=$(dirname "$local_path")
     mkdir -p "$local_dir" || return 1
 
-    # Check if file exists and we should verify size
+    # Get remote file size for accurate comparison
+    remote_size=$(get_remote_file_size "$file_url")
+    [ "$file_size" -eq 0 ] && file_size="$remote_size"
+
+    debug "=== DOWNLOAD START: $filename ==="
+    debug "  File URL: $file_url"
+    debug "  Local path: $local_path"
+    debug "  Expected size: $file_size bytes"
+    debug "  Remote size: $remote_size bytes"
+    debug "  Resume enabled: $RESUME"
+    debug "  Force overwrite: $FORCE_OVERWRITE"
+
+    # Enhanced file existence and size checking
+    will_resume=0
     if [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 0 ]; then
         # Get local file size
         local_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+        debug "  Local file exists, size: $local_size bytes"
 
-        # Get remote file size
-        remote_size=$(get_remote_file_size "$file_url")
-
-        if [ "$remote_size" -gt 0 ] && [ "$local_size" -eq "$remote_size" ]; then
-            # File exists and sizes match - skip download
-            log "  ✓ $filename ($(format_bytes "$local_size") - already exists)"
-            SKIPPED_FILES=$((SKIPPED_FILES + 1))
-            return 0
-        elif [ "$remote_size" -gt 0 ] && [ "$local_size" -ne "$remote_size" ]; then
-            # File exists but sizes differ - download will overwrite
-            log "  ↻ $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - updating)"
-            debug "    Size differs: local $local_size vs remote $remote_size bytes"
+        if [ "$remote_size" -gt 0 ]; then
+            if [ "$local_size" -eq "$remote_size" ]; then
+                # File exists and sizes match - skip download
+                log "  ✓ $filename ($(format_bytes "$local_size") - already exists)"
+                debug "  SKIP: File complete, no download needed"
+                SKIPPED_FILES=$((SKIPPED_FILES + 1))
+                return 0
+            elif [ "$local_size" -lt "$remote_size" ] && [ "$RESUME" -eq 1 ]; then
+                # File exists but is smaller - resume download
+                remaining_bytes=$((remote_size - local_size))
+                percent_complete=$((local_size * 100 / remote_size))
+                log "  ↻ $filename (resuming at ${percent_complete}% - $(format_bytes "$local_size")/$(format_bytes "$remote_size"))"
+                debug "  RESUME: Partial file found, downloading remaining $remaining_bytes bytes"
+                will_resume=1
+            elif [ "$local_size" -lt "$remote_size" ] && [ "$RESUME" -eq 0 ]; then
+                # File exists but is smaller and resume is disabled - redownload
+                log "  ↻ $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - incomplete, restarting)"
+                debug "  RESTART: Partial file found but resume disabled"
+            elif [ "$local_size" -gt "$remote_size" ]; then
+                # Local file is larger than expected - redownload
+                log "  ↻ $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - larger than expected, restarting)"
+                debug "  RESTART: Local file larger than remote ($local_size > $remote_size)"
+            fi
         else
-            # Could not determine remote size - proceed with download
-            log "  ? $filename (size unknown - redownloading)"
+            # Could not determine remote size - check if we should resume based on file existence
+            if [ "$RESUME" -eq 1 ] && [ "$local_size" -gt 0 ]; then
+                log "  ↻ $filename (remote size unknown, attempting resume from $(format_bytes "$local_size"))"
+                debug "  RESUME: Remote size unknown, will attempt resume"
+                will_resume=1
+            else
+                log "  ? $filename (size unknown - redownloading)"
+                debug "  RESTART: Size unknown, will download fresh"
+            fi
         fi
     elif [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 1 ]; then
         # File exists but force overwrite is enabled
         log "  ↻ $filename (force overwrite)"
+        debug "  RESTART: Force overwrite enabled"
+    else
+        # File doesn't exist - fresh download
+        debug "  NEW: File doesn't exist, fresh download"
     fi
 
     # Show progress for this file
@@ -1006,22 +1090,80 @@ download_file() {
     debug "  Downloading: $filename"
     debug "    URL: $file_url"
     debug "    Local: $local_path"
+    debug "    Resume enabled: $RESUME, Will resume: $will_resume"
 
+    # Build curl options with enhanced resume support
     curl_opts="--silent --location --retry 3 --connect-timeout 30 --max-time 300"
-    [ "$RESUME" -eq 1 ] && curl_opts="$curl_opts --continue-at -"
+
+    if [ "$will_resume" -eq 1 ] && [ "$RESUME" -eq 1 ]; then
+        # Use specific resume position instead of automatic detection
+        local_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+        curl_opts="$curl_opts --continue-at $local_size"
+        debug "    Resuming from byte position: $local_size"
+    elif [ "$RESUME" -eq 1 ]; then
+        # General resume flag (fallback)
+        curl_opts="$curl_opts --continue-at -"
+        debug "    Using automatic resume detection"
+    fi
+
+    # Track initial file size for progress calculation
+    initial_size=0
+    if [ "$will_resume" -eq 1 ]; then
+        initial_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+    fi
 
     if curl $curl_opts -o "$local_path" "$file_url"; then
-        # Update downloaded bytes counter
-        if [ "$file_size" -gt 0 ]; then
-            DOWNLOADED_BYTES=$((DOWNLOADED_BYTES + file_size))
+        # Get final file size
+        final_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+
+        debug "=== DOWNLOAD COMPLETE: $filename ==="
+        debug "  Initial size: $initial_size bytes"
+        debug "  Final size: $final_size bytes"
+        debug "  Expected size: $file_size bytes"
+        debug "  Remote size: $remote_size bytes"
+
+        # Verify download completion
+        if [ "$remote_size" -gt 0 ]; then
+            if [ "$final_size" -eq "$remote_size" ]; then
+                debug "  SUCCESS: File size matches remote ($final_size = $remote_size)"
+            elif [ "$final_size" -lt "$remote_size" ]; then
+                debug "  WARNING: File still incomplete ($final_size < $remote_size)"
+                log "  ⚠ $filename (download may be incomplete: $(format_bytes "$final_size")/$(format_bytes "$remote_size"))"
+            elif [ "$final_size" -gt "$remote_size" ]; then
+                debug "  WARNING: File larger than expected ($final_size > $remote_size)"
+                log "  ⚠ $filename (file larger than expected: $(format_bytes "$final_size") vs $(format_bytes "$remote_size"))"
+            fi
         else
-            # If we don't know the size, get it from the downloaded file
-            downloaded_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
-            DOWNLOADED_BYTES=$((DOWNLOADED_BYTES + downloaded_size))
+            debug "  SUCCESS: Download completed (remote size unknown)"
+        fi
+
+        # Calculate downloaded bytes (for resumed downloads, only count the new portion)
+        if [ "$will_resume" -eq 1 ] && [ "$initial_size" -gt 0 ]; then
+            downloaded_this_time=$((final_size - initial_size))
+            if [ "$downloaded_this_time" -gt 0 ]; then
+                DOWNLOADED_BYTES=$((DOWNLOADED_BYTES + downloaded_this_time))
+                debug "  Downloaded this session: $(format_bytes "$downloaded_this_time")"
+            else
+                # Fallback: use file_size if calculation failed
+                if [ "$file_size" -gt 0 ]; then
+                    DOWNLOADED_BYTES=$((DOWNLOADED_BYTES + file_size))
+                    debug "  Using expected size for progress: $(format_bytes "$file_size")"
+                fi
+            fi
+        else
+            # Fresh download or full restart
+            if [ "$file_size" -gt 0 ]; then
+                DOWNLOADED_BYTES=$((DOWNLOADED_BYTES + file_size))
+                debug "  Using expected size for progress: $(format_bytes "$file_size")"
+            else
+                # If we don't know the expected size, use the actual downloaded size
+                DOWNLOADED_BYTES=$((DOWNLOADED_BYTES + final_size))
+                debug "  Using actual size for progress: $(format_bytes "$final_size")"
+            fi
         fi
 
         DOWNLOADED_FILES=$((DOWNLOADED_FILES + 1))
-        debug "  ✓ Completed: $filename"
+        log "  ✓ $filename ($(format_bytes "$final_size"))"
         return 0
     else
         error "  ✗ Failed: $filename"
@@ -1030,6 +1172,11 @@ download_file() {
         # Try to get HTTP status code for better error reporting
         http_code=$(curl --silent --location --head --write-out "%{http_code}" --output /dev/null "$file_url" 2>/dev/null || echo "Unknown")
         debug "    HTTP Status: $http_code"
+
+        # Check if the server supports range requests (important for resume)
+        if [ "$will_resume" -eq 1 ] && [ "$http_code" = "416" ]; then
+            debug "    Server does not support range requests or file is complete"
+        fi
 
         return 1
     fi
@@ -1440,7 +1587,7 @@ main() {
     if [ "$DRY_RUN" -eq 0 ] && [ -f "$DOWNLOAD_QUEUE_FILE" ]; then
         log "Starting download of $TOTAL_FILES_TO_DOWNLOAD files..."
         log "Source: $BASE_URL"
-        
+
         # Show clean file list
         printf "\n"
         printf "Files to download:\n"
@@ -1455,9 +1602,25 @@ main() {
         printf "────────────────────────────────────────\n"
         printf "\n"
 
-        # Process download queue
+        # Process download queue - use a copy to avoid file pointer issues
+        DOWNLOAD_QUEUE_COPY="$TEMP_DIR/download_queue_copy_$$.txt"
+        cp "$DOWNLOAD_QUEUE_FILE" "$DOWNLOAD_QUEUE_COPY"
+
+        debug "=== STARTING DOWNLOAD QUEUE PROCESSING ==="
+        debug "  Queue file: $DOWNLOAD_QUEUE_COPY"
+        debug "  Total files in queue: $(wc -l < "$DOWNLOAD_QUEUE_COPY" 2>/dev/null || echo '0')"
+
+        processed_count=0
         while IFS='|' read -r action file_url local_path filename file_type file_size || [ -n "$action" ]; do
             [ "$action" != "DOWNLOAD" ] && continue
+
+            processed_count=$((processed_count + 1))
+            debug "=== PROCESSING QUEUE ITEM #$processed_count ==="
+            debug "  Filename: $filename"
+            debug "  File URL: $file_url"
+            debug "  Local path: $local_path"
+            debug "  File type: $file_type"
+            debug "  File size: $file_size"
 
             # Create directory if needed
             local_dir=$(dirname "$local_path")
@@ -1467,7 +1630,15 @@ main() {
 
             # Download file with progress tracking
             download_file "$file_url" "$local_path" "$filename" "$file_size" "$file_type"
-        done < "$DOWNLOAD_QUEUE_FILE"
+
+            debug "=== COMPLETED QUEUE ITEM #$processed_count ==="
+        done < "$DOWNLOAD_QUEUE_COPY"
+
+        debug "=== DOWNLOAD QUEUE PROCESSING COMPLETE ==="
+        debug "  Processed $processed_count files"
+
+        # Clean up the copy
+        rm -f "$DOWNLOAD_QUEUE_COPY"
 
         # Show final progress
         complete_download_progress
@@ -1502,4 +1673,3 @@ main() {
 
 # Run main function with all arguments
 main "$@"
-
