@@ -1,4 +1,4 @@
-﻿#!/bin/sh
+#!/bin/sh
 
 # bdixdl - POSIX-compliant H5AI media downloader
 # Downloads media files from h5ai HTTP directory listings with advanced features
@@ -25,6 +25,7 @@ MAX_SEARCH_DEPTH="$DEFAULT_MAX_DEPTH"
 MAX_THREADS="$DEFAULT_THREADS"
 DRY_RUN=0
 QUIET=0
+DEBUG=0
 RESUME=0
 FORCE_OVERWRITE=0
 CONFIG_FILE="$DEFAULT_CONFIG_FILE"
@@ -56,6 +57,10 @@ SHOW_PROGRESS=1  # 1=show detailed progress, 0=simple progress
 
 log() {
     [ "$QUIET" -eq 0 ] && printf "[%s] %s\n" "$(date '+%H:%M:%S')" "$*"
+}
+
+debug() {
+    [ "$DEBUG" -eq 1 ] && [ "$QUIET" -eq 0 ] && printf "[DEBUG] %s\n" "$*"
 }
 
 error() {
@@ -95,6 +100,7 @@ OPTIONS:
     -r, --resume           Resume interrupted downloads
     -f, --force-overwrite  Force overwrite existing files (skip if same size by default)
     -q, --quiet            Suppress non-error output
+    --debug                Show debug information (verbose logging)
     -c, --config FILE      Use custom config file (default: $DEFAULT_CONFIG_FILE)
     -h, --help             Show this help message
     -v, --version          Show version information
@@ -108,6 +114,7 @@ CONFIG FILE:
     RESUME=1
     QUIET=0
     SHOW_PROGRESS=1
+    DEBUG=0
 
 EXAMPLES:
     $SCRIPT_NAME https://ftp.yourserever.net/media/ "movie 2023"
@@ -160,6 +167,7 @@ load_config() {
             MAX_THREADS) MAX_THREADS="$value" ;;
             RESUME) RESUME="$value" ;;
             QUIET) QUIET="$value" ;;
+            DEBUG) DEBUG="$value" ;;
             SHOW_PROGRESS) SHOW_PROGRESS="$value" ;;
         esac
     done < "$CONFIG_FILE"
@@ -245,7 +253,7 @@ get_href_paths() {
 
     # Debug output
     content_size=$(wc -c < "$html_content")
-    log "  Received HTML content: $content_size bytes"
+    debug "  Received HTML content: $content_size bytes"
 
     # Try to find all links (both files and directories)
     # Use a more general approach to find all href attributes
@@ -263,7 +271,7 @@ get_href_paths() {
 
     # Debug output
     link_count=$(wc -l < "$TEMP_DIR/links_$$.txt")
-    log "  Found $link_count total links"
+    debug "  Found $link_count total links"
 
     # Output the results
     cat "$TEMP_DIR/links_$$.txt"
@@ -307,23 +315,23 @@ is_supported_extension() {
     ext=$(printf '%s' "$filename" | sed 's/.*\.//' | tr '[:upper:]' '[:lower:]')
 
     # Debug output
-    [ "$QUIET" -eq 0 ] && printf "      Extension check: '%s' -> '%s'\n" "$filename" "$ext"
+    debug "      Extension check: '%s' -> '%s'" "$filename" "$ext"
 
     all_extensions="$MEDIA_EXTENSIONS $POSTER_EXTENSIONS $SUBTITLE_EXTENSIONS"
     for supported_ext in $all_extensions; do
         if [ "$ext" = "$supported_ext" ]; then
-            [ "$QUIET" -eq 0 ] && printf "      MATCH: Extension '%s' is supported\n" "$ext"
+            debug "      MATCH: Extension '%s' is supported" "$ext"
             return 0
         fi
     done
 
-    [ "$QUIET" -eq 0 ] && printf "      SKIP: Extension '%s' not supported\n" "$ext"
+    debug "      SKIP: Extension '%s' not supported" "$ext"
     return 1
 }
 
 # Debug function to show URL filtering
 debug_url_filter() {
-    [ "$QUIET" -eq 0 ] && printf "URL FILTER: %s -> %s\n" "$1" "$2"
+    debug "URL FILTER: %s -> %s" "$1" "$2"
 }
 
 # Find matching folders recursively - COMPLETELY REWRITTEN
@@ -374,7 +382,7 @@ find_matching_folders() {
         # Skip h5ai internal paths
         case "$link_path" in
             */_h5ai/*)
-                log "    Skipping h5ai internal path: $link_path"
+                debug "    Skipping h5ai internal path: $link_path"
                 continue
                 ;;
         esac
@@ -401,13 +409,13 @@ find_matching_folders() {
 
                 # Skip if URL is the same as current URL (prevents infinite loops)
                 if [ "$full_folder_url" = "$current_url" ]; then
-                    log "    Skipping already processed URL: $full_folder_url"
+                    debug "    Skipping already processed URL: $full_folder_url"
                     continue
                 fi
 
                 display_path="${full_folder_url#$BASE_URL}"
 
-                log "    Found directory: $folder_name"
+                debug "    Found directory: $folder_name"
 
                 if matches_keywords "$folder_name"; then
                     log "  -> MATCH: $folder_name"
@@ -415,7 +423,7 @@ find_matching_folders() {
                 fi
                 find_matching_folders "$full_folder_url" $((current_depth + 1)) "$display_path"
             else
-                log "    Skipping external URL: $link_path"
+                debug "    Skipping external URL: $link_path"
             fi
             continue
         fi
@@ -451,20 +459,20 @@ find_matching_folders() {
 
         # Skip if URL is the same as current URL (prevents infinite loops)
         if [ "$full_folder_url" = "$current_url" ]; then
-            log "    Skipping already processed URL: $full_folder_url"
+            debug "    Skipping already processed URL: $full_folder_url"
             continue
         fi
 
         # Create display path
         display_path="$current_display_path/$folder_name"
 
-        log "    Found directory: $folder_name"
-        log "    Full URL: $full_folder_url"
+        debug "    Found directory: $folder_name"
+        debug "    Full URL: $full_folder_url"
 
         # Check if folder matches keywords
         if matches_keywords "$folder_name"; then
             log "  -> MATCH: $folder_name"
-            log "  DEBUG: Storing in matches - folder_name='$folder_name', display_path='$display_path'"
+            debug "  DEBUG: Storing in matches - folder_name='$folder_name', display_path='$display_path'"
             # Store only the base folder name, not the full path
             printf '%s|%s|%s\n' "$full_folder_url" "$display_path" "$folder_name" >> "$TEMP_DIR/matches"
         fi
@@ -495,7 +503,7 @@ count_directory_files() {
         # Skip h5ai paths and directories
         case "$decoded_path" in
             */_h5ai/*)
-                log "    Skipping h5ai file: $decoded_path"
+                debug "    Skipping h5ai file: $decoded_path"
                 continue
                 ;;
             */)
@@ -690,22 +698,22 @@ scan_directory_files() {
             remote_size=$(get_remote_file_size "$file_url")
 
             # Debug: show the local path being checked
-            [ "$QUIET" -eq 0 ] && log "      Checking local path: $local_path"
+            debug "      Checking local path: $local_path"
 
             # Check if local file exists
             will_skip=0
             if [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 0 ]; then
                 local_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
-                [ "$QUIET" -eq 0 ] && log "      File exists locally, size: $local_size bytes"
+                debug "      File exists locally, size: $local_size bytes"
                 if [ "$remote_size" -gt 0 ] && [ "$local_size" -eq "$remote_size" ]; then
-                    [ "$QUIET" -eq 0 ] && log "      File sizes match, will skip"
+                    debug "      File sizes match, will skip"
                     will_skip=1
                 else
-                    [ "$QUIET" -eq 0 ] && log "      File sizes differ, will download"
+                    debug "      File sizes differ, will download"
                 fi
             else
                 # Debug: show that file doesn't exist locally
-                [ "$QUIET" -eq 0 ] && log "      File does not exist locally: $local_path"
+                debug "      File does not exist locally: $local_path"
             fi
 
             # Output file processing result to temp file instead of updating counters directly
@@ -911,12 +919,11 @@ show_download_progress() {
 
     # Clear line and show progress
     printf "\r\033[K"  # Clear line
-    printf "[%s] Progress: %d/%d (%d%%) | %s (%s) | Speed: %s | ETA: %s" \
+    printf "[%s] %d/%d (%d%%) | %s | %s/s | ETA: %s" \
            "$(date '+%H:%M:%S')" \
            "$CURRENT_FILE_NUMBER" \
            "$TOTAL_FILES_TO_DOWNLOAD" \
            "$percentage" \
-           "$current_file" \
            "$file_size_formatted" \
            "$speed_display" \
            "$remaining_time"
@@ -948,8 +955,8 @@ complete_download_progress() {
     fi
 
     printf "\r\033[K"  # Clear line
-    printf "[%s] Download completed! | Downloaded: %d files | Total size: %s\n" \
-           "$(date '+%H:%M:%S')" \
+    printf "\n"
+    printf "✓ Download completed! %d files, %s\n" \
            "$DOWNLOADED_FILES" \
            "$(format_bytes "$DOWNLOADED_BYTES")"
 }
@@ -975,30 +982,30 @@ download_file() {
 
         if [ "$remote_size" -gt 0 ] && [ "$local_size" -eq "$remote_size" ]; then
             # File exists and sizes match - skip download
-            log "  Skipping: $filename (already exists, same size: $local_size bytes)"
+            log "  ✓ $filename ($(format_bytes "$local_size") - already exists)"
             SKIPPED_FILES=$((SKIPPED_FILES + 1))
             return 0
         elif [ "$remote_size" -gt 0 ] && [ "$local_size" -ne "$remote_size" ]; then
             # File exists but sizes differ - download will overwrite
-            log "  Replacing: $filename (exists but size differs: local $local_size vs remote $remote_size bytes)"
+            log "  ↻ $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - updating)"
+            debug "    Size differs: local $local_size vs remote $remote_size bytes"
         else
             # Could not determine remote size - proceed with download
-            log "  Redownloading: $filename (exists but remote size unknown)"
+            log "  ? $filename (size unknown - redownloading)"
         fi
     elif [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 1 ]; then
         # File exists but force overwrite is enabled
-        log "  Overwriting: $filename (force overwrite enabled)"
+        log "  ↻ $filename (force overwrite)"
     fi
 
     # Show progress for this file
     CURRENT_FILE_NUMBER=$((CURRENT_FILE_NUMBER + 1))
     show_download_progress "$filename" "$file_size" "$file_type"
 
-    if [ "$QUIET" -eq 0 ]; then
-        printf "  Downloading: %s\n" "$filename"
-        printf "  URL: %s\n" "$file_url"
-        printf "  Local path: %s\n" "$local_path"
-    fi
+    # Show download info only in debug mode
+    debug "  Downloading: $filename"
+    debug "    URL: $file_url"
+    debug "    Local: $local_path"
 
     curl_opts="--silent --location --retry 3 --connect-timeout 30 --max-time 300"
     [ "$RESUME" -eq 1 ] && curl_opts="$curl_opts --continue-at -"
@@ -1014,14 +1021,15 @@ download_file() {
         fi
 
         DOWNLOADED_FILES=$((DOWNLOADED_FILES + 1))
+        debug "  ✓ Completed: $filename"
         return 0
     else
-        error "Failed to download: $filename"
-        error "URL: $file_url"
+        error "  ✗ Failed: $filename"
+        debug "    URL: $file_url"
 
         # Try to get HTTP status code for better error reporting
         http_code=$(curl --silent --location --head --write-out "%{http_code}" --output /dev/null "$file_url" 2>/dev/null || echo "Unknown")
-        error "HTTP Status: $http_code"
+        debug "    HTTP Status: $http_code"
 
         return 1
     fi
@@ -1034,9 +1042,9 @@ download_directory_files() {
     folder_name="$3"
 
     log "Processing: $folder_name"
-    log "  DEBUG: Received folder_name='$folder_name'"
-    log "  DEBUG: Received local_base='$local_base'"
-    log "  Fetching directory listing from: $remote_url"
+    debug "  DEBUG: Received folder_name='$folder_name'"
+    debug "  DEBUG: Received local_base='$local_base'"
+    debug "  Fetching directory listing from: $remote_url"
 
     href_paths=$(get_href_paths "$remote_url")
     if [ -z "$href_paths" ]; then
@@ -1045,7 +1053,7 @@ download_directory_files() {
     fi
 
     # Debug: show what we found
-    log "  Found $(printf '%s\n' "$href_paths" | wc -l) items in directory"
+    debug "  Found $(printf '%s\n' "$href_paths" | wc -l) items in directory"
 
     # Decode folder name for local directory creation
     folder_name_decoded=$(url_decode "$folder_name")
@@ -1053,7 +1061,7 @@ download_directory_files() {
     # Create local directory - use the folder name directly without accumulating paths
     local_dir="$local_base/$folder_name_decoded"
     mkdir -p "$local_dir"
-    log "  Created local directory: $local_dir"
+    debug "  Created local directory: $local_dir"
 
     # Get base domain for absolute paths
     base_domain=$(echo "$BASE_URL" | sed 's|^\(https\?://[^/]*\).*|\1|')
@@ -1103,7 +1111,7 @@ download_directory_files() {
 
             # Skip if subdirectory name is empty or just whitespace
             if [ -z "$subdir_name" ] || [ -z "$(echo "$subdir_name" | tr -d '[:space:]')" ]; then
-                log "    Skipping empty subdirectory name"
+                debug "    Skipping empty subdirectory name"
                 continue
             fi
 
@@ -1125,20 +1133,20 @@ download_directory_files() {
 
             # Skip if subdirectory URL is the same as current URL (this catches self-referencing directories)
             if [ "$subdir_url" = "$remote_url" ] || [ "${subdir_url%/}" = "${remote_url%/}" ]; then
-                log "    Skipping self-referencing directory: $subdir_name"
+                debug "    Skipping self-referencing directory: $subdir_name"
                 continue
             fi
 
             # Skip if subdirectory has the same name as current directory (additional safety check)
             # Compare decoded names to handle URL encoding differences
             if [ "$subdir_name" = "$folder_name_decoded" ] || [ "$subdir_name" = "$folder_name" ]; then
-                log "    Skipping subdirectory with same name as parent: $subdir_name"
+                debug "    Skipping subdirectory with same name as parent: $subdir_name"
                 continue
             fi
 
-            log "    Found subdirectory: $subdir_name"
-            log "    Subdirectory URL: $subdir_url"
-            log "    DEBUG: Storing subdirectory name: '$subdir_name'"
+            debug "    Found subdirectory: $subdir_name"
+            debug "    Subdirectory URL: $subdir_url"
+            debug "    DEBUG: Storing subdirectory name: '$subdir_name'"
             printf "%s|%s\n" "$subdir_url" "$subdir_name" >> "$temp_dirs"
             continue
         fi
@@ -1173,7 +1181,7 @@ download_directory_files() {
             if [ "$DRY_RUN" -eq 1 ]; then
                 printf "  Would download: %s\n" "$filename"
             else
-                printf "  Found file to download: %s\n" "$filename"
+                debug "  Found file to download: %s\n" "$filename"
             fi
         fi
     done
@@ -1207,8 +1215,8 @@ download_directory_files() {
         while IFS='|' read -r subdir_url subdir_name || [ -n "$subdir_url" ]; do
             [ -z "$subdir_url" ] && continue
 
-            log "  Recursing into subdirectory: $subdir_name"
-            log "  DEBUG: About to call download_directory_files with folder_name='$subdir_name'"
+        debug "  Recursing into subdirectory: $subdir_name"
+            debug "  DEBUG: About to call download_directory_files with folder_name='$subdir_name'"
             # Recursively download from subdirectory - use original local_base to avoid nested directories
             download_directory_files "$subdir_url" "$local_base" "$subdir_name"
         done < "$temp_dirs"
@@ -1250,6 +1258,10 @@ parse_arguments() {
                 ;;
             -q|--quiet)
                 QUIET=1
+                shift
+                ;;
+            --debug)
+                DEBUG=1
                 shift
                 ;;
             -c|--config)
@@ -1334,11 +1346,11 @@ main() {
 
     # Debug: show all matches found
     if [ -f "$TEMP_DIR/matches" ]; then
-        log "DEBUG: All matches found:"
+        debug "DEBUG: All matches found:"
         while IFS='|' read -r url path name; do
-            log "  URL: $url"
-            log "  Path: $path"
-            log "  Name: $name"
+            debug "  URL: $url"
+            debug "  Path: $path"
+            debug "  Name: $name"
         done < "$TEMP_DIR/matches"
     fi
 
@@ -1355,7 +1367,7 @@ main() {
     while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
         count=$((count + 1))
         printf "  %d. %s\n" "$count" "$folder_name"
-        log "     URL: $folder_url"
+        debug "     URL: $folder_url"
     done < "$TEMP_DIR/matches"
 
     # Folder selection logic
@@ -1427,6 +1439,21 @@ main() {
     # NEW: Process download queue if not dry run
     if [ "$DRY_RUN" -eq 0 ] && [ -f "$DOWNLOAD_QUEUE_FILE" ]; then
         log "Starting download of $TOTAL_FILES_TO_DOWNLOAD files..."
+        log "Source: $BASE_URL"
+        
+        # Show clean file list
+        printf "\n"
+        printf "Files to download:\n"
+        printf "────────────────────────────────────────\n"
+        file_count=0
+        while IFS='|' read -r action file_url local_path filename file_type file_size || [ -n "$action" ]; do
+            [ "$action" != "DOWNLOAD" ] && continue
+            file_count=$((file_count + 1))
+            size_formatted=$(format_bytes "$file_size")
+            printf "%2d. %s (%s)\n" "$file_count" "$filename" "$size_formatted"
+        done < "$DOWNLOAD_QUEUE_FILE"
+        printf "────────────────────────────────────────\n"
+        printf "\n"
 
         # Process download queue
         while IFS='|' read -r action file_url local_path filename file_type file_size || [ -n "$action" ]; do
@@ -1436,8 +1463,7 @@ main() {
             local_dir=$(dirname "$local_path")
             mkdir -p "$local_dir"
 
-            # Debug output to verify parameters
-            log "DEBUG: Processing download - URL: $file_url, Local: $local_path, Filename: $filename, Type: $file_type, Size: $file_size"
+            debug "Processing: $filename ($(format_bytes "$file_size"))"
 
             # Download file with progress tracking
             download_file "$file_url" "$local_path" "$filename" "$file_size" "$file_type"
@@ -1450,12 +1476,12 @@ main() {
         log "Processing selected folders..."
         while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
             log "Processing folder: $folder_name"
-            log "  URL: $folder_url"
-            log "  Path: $folder_path"
-            log "  DEBUG: Original folder_name='$folder_name'"
+            debug "  URL: $folder_url"
+            debug "  Path: $folder_path"
+            debug "  DEBUG: Original folder_name='$folder_name'"
             # Use only the base folder name, not the full path
             base_folder_name=$(basename "$folder_name")
-            log "  DEBUG: base_folder_name='$base_folder_name'"
+            debug "  DEBUG: base_folder_name='$base_folder_name'"
             download_directory_files "$folder_url" "$DOWNLOAD_DESTINATION" "$base_folder_name"
         done < "$TEMP_DIR/matches"
     fi
@@ -1476,3 +1502,4 @@ main() {
 
 # Run main function with all arguments
 main "$@"
+
