@@ -46,6 +46,15 @@ A powerful POSIX-compliant shell script for downloading media files from **h5ai*
 - **Multiple Filter Combinations**: Combine different filter types for precise control
 - **Detailed Reporting**: Shows filtered files and active filters in summary
 
+### 🆕 Enhanced Interruption Handling
+- **Graceful Ctrl+C Handling**: Immediate response to user interruption with proper cleanup
+- **Download State Tracking**: Real-time tracking of current download and directory context
+- **Progress Preservation**: Saves complete session state for easy resumption
+- **Clean Shutdown**: Proper termination of background processes and temporary files
+- **Comprehensive Summary**: Detailed interruption report with progress statistics
+- **Smart Resume Integration**: Seamless integration with existing resume functionality
+- **User-Friendly Messages**: Colored output and clear instructions for resuming
+
 ## Prerequisites
 
 The script requires the following common command-line tools:
@@ -134,6 +143,12 @@ These are typically available on most Unix-like systems (Linux, macOS, BSD, etc.
 
 # Quiet mode for automated scripts with custom config
 ./down.sh -q -c ~/.config/bdixdl.conf https://files.yourserever.net/ "backup"
+
+# Graceful interruption and resume workflow
+./down.sh -r -t 5 https://media.yourserever.com/ "4k movies"
+# Press Ctrl+C during download to gracefully stop
+# Resume the interrupted session:
+./down.sh --resume
 ```
 
 ## Command Line Options
@@ -246,6 +261,8 @@ EXCLUDE_REGEX=.*[Ss]ample.*|.*[Tt]railer.*|.*[Bb]onus.*
    - Shows current file, progress percentage, speed, and ETA
    - Visual progress bar
    - File-by-file progress updates
+   - 🆕 Graceful interruption handling with Ctrl+C support
+   - 🆕 Session state preservation for easy resumption
 
 ## Enhanced Resume Functionality
 
@@ -323,6 +340,85 @@ Active filters:
   Exclude keywords: sample,trailer
 ```
 
+## Enhanced Interruption Handling
+
+The script now includes sophisticated interruption handling that provides a smooth user experience when downloads need to be stopped.
+
+### How Interruption Works
+1. **Signal Detection**: Instantly detects Ctrl+C (SIGINT) and termination signals (SIGTERM)
+2. **Graceful Stop**: Safely stops the current download process without corruption
+3. **State Preservation**: Saves complete session state including current progress
+4. **Process Cleanup**: Properly terminates background processes and temporary files
+5. **Progress Summary**: Shows detailed statistics of what was accomplished
+6. **Resume Guidance**: Provides clear instructions for resuming the session
+
+### Interruption Features
+
+#### Real-time Download Monitoring
+- Continuous monitoring of download progress during file transfers
+- Background process management for interruption detection
+- Progress display for large files during interruption
+- Safe termination of ongoing downloads without file corruption
+
+#### Session State Management
+- Persistent state file storage with complete download context
+- Tracking of current download URL, filename, and directory
+- Preservation of download statistics and progress counters
+- Integration with existing resume functionality
+
+#### User-Friendly Interface
+- Colored interruption messages for better visibility
+- Clear indication of interruption reason and status
+- Detailed summary with files processed, skipped, and downloaded data
+- Step-by-step instructions for resuming interrupted sessions
+
+### Example Interruption Output
+```
+*** Interruption detected (Ctrl+C) ***
+Gracefully stopping downloads and saving progress...
+
+=== Download Session Interrupted ===
+Reason: SIGINT
+Files processed: 5/15
+Files skipped: 2
+Data downloaded: 2.5 GB
+Average speed: 5.2 MB/s
+Current download was: Movie4K.mkv
+This file can be resumed with --resume flag
+
+To resume this session, run:
+  ./down.sh --resume [other-options]
+
+State saved to: /tmp/bdixdl_state_12345
+```
+
+### Interruption Behavior
+- **Immediate Response**: Ctrl+C is instantly recognized and processed
+- **Current File**: Completes current download to a safe state or marks for resume
+- **Queue Processing**: Stops processing remaining files in the queue
+- **Directory Traversal**: Halts further directory scanning and processing
+- **Progress Tracking**: Preserves all progress statistics and counters
+- **State File**: Creates persistent state file for seamless resumption
+
+### Resume After Interruption
+```bash
+# Resume interrupted session with saved state
+./down.sh --resume
+
+# Resume with additional options
+./down.sh --resume --debug --max-size 10G
+
+# Resume with different destination (if needed)
+./down.sh --resume -d ~/new-downloads
+```
+
+### Best Practices
+- **Single Ctrl+C**: Press Ctrl+C once for graceful interruption
+- **Wait for Completion**: Allow the script to finish cleanup and save state
+- **Check Summary**: Review the interruption summary for progress details
+- **Use Resume**: Leverage the --resume flag to continue efficiently
+- **State File**: The state file is automatically cleaned up on successful completion
+
 ## How It Works
 
 ### Discovery
@@ -399,11 +495,30 @@ Active filters:
 - Verify filter syntax (especially regex patterns)
 - Check for case sensitivity in keyword filters
 
+**Interruption not working properly**
+- Press Ctrl+C only once and wait for graceful shutdown
+- Check the interruption summary for state file location
+- Verify the state file was created successfully
+- Use `--debug` to see detailed interruption process
+
+**Resume after interruption not working**
+- Ensure state file exists (location shown in interruption summary)
+- Check that you're using the same command-line options
+- Verify the download destination hasn't changed
+- Use `--debug` to see resume decision process
+
+**State file missing or corrupted**
+- State files are automatically cleaned up on successful completion
+- If session was completed normally, no resume is needed
+- Start a new session if state file is not found
+- Check for multiple state files if script was interrupted multiple times
+
 **Permission denied errors**
 - Make sure the script is executable: `chmod +x down.sh`
 - Check write permissions in the download directory
 - Verify you have network access to the target server
 - Ensure destination directory exists or can be created
+- Check write permissions for state file location (typically /tmp)
 
 ### Debug Mode
 
@@ -481,6 +596,10 @@ If you encounter any issues or have questions:
 ### v1.1.0 (Latest)
 - **Enhanced Resume Functionality**: Intelligent partial download detection and byte-accurate resume
 - **Advanced Filtering System**: Size, extension, keyword, and regex filtering
+- **🆕 Enhanced Interruption Handling**: Graceful Ctrl+C handling with state preservation
+- **🆕 Real-time Download Monitoring**: Background process monitoring with progress display
+- **🆕 Session State Management**: Persistent state file for seamless resumption
+- **🆕 User-Friendly Interface**: Colored interruption messages and comprehensive summaries
 - **Improved Debug Logging**: Comprehensive logging for troubleshooting
 - **Fixed Duplicate Download Issues**: Resolved files being processed multiple times
 - **Enhanced Queue Processing**: Better handling of download queue and file tracking

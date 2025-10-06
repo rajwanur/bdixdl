@@ -26,7 +26,8 @@ MAX_THREADS="$DEFAULT_THREADS"
 DRY_RUN=0
 QUIET=0
 DEBUG=0
-RESUME=0
+RESUME=0               # Individual file resume (partial downloads)
+SESSION_RESUME=0        # Session resume (complete session state)
 FORCE_OVERWRITE=0
 CONFIG_FILE="$DEFAULT_CONFIG_FILE"
 # Use a more portable temporary directory location
@@ -46,12 +47,27 @@ SUBTITLE_TOTAL_SIZE=0
 MEDIA_SKIPPED_COUNT=0
 POSTER_SKIPPED_COUNT=0
 SUBTITLE_SKIPPED_COUNT=0
-DOWNLOAD_QUEUE_FILE=""
+DOWNLOAD_QUEUE_FILE="$TEMP_DIR/download_queue_$$.txt"
 CURRENT_FILE_NUMBER=0
 TOTAL_FILES_TO_DOWNLOAD=0
 START_TIME=0
 DOWNLOADED_BYTES=0
 SHOW_PROGRESS=1  # 1=show detailed progress, 0=simple progress
+
+# Session tracking variables for resume functionality
+SESSION_CONTEXT=""         # Track current session context (matches from find_matching_folders)
+RESUME_CONTEXT_SAVED=0     # Track if we've saved the session context for resuming
+
+# Enhanced signal handling variables
+INTERRUPTED=0              # Flag to track if user interrupted
+CLEANUP_IN_PROGRESS=0      # Flag to prevent multiple cleanups
+CURRENT_DOWNLOAD_URL=""    # Track current download for interruption
+CURRENT_DOWNLOAD_FILE=""   # Track current file for interruption
+CURRENT_BASE_URL=""        # Track current directory for interruption
+CURRENT_FOLDER_NAME=""     # Track current folder for interruption
+INTERRUPT_REASON=""        # Track reason for interruption (SIGINT, SIGTERM, EXIT)
+STATE_FILE="./${SCRIPT_NAME}_state_$$"  # Session-specific state file
+RESUME_STATE_FILE="./${SCRIPT_NAME}_resume_state"  # Fixed resume state file
 
 # File filtering options
 MIN_FILE_SIZE=0          # Minimum file size in bytes (0 = no minimum)
@@ -80,8 +96,253 @@ die() {
     exit 1
 }
 
+# Signal handler for user interruption (Ctrl+C)
+handle_interrupt() {
+    if [ "$INTERRUPTED" -eq 0 ]; then
+        INTERRUPTED=1
+        INTERRUPT_REASON="SIGINT"
+        echo ""
+        printf "\033[1;33m*** Interruption detected (Ctrl+C) ***\033[0m\n"
+        printf "\033[1;33mGracefully stopping downloads and saving progress...\033[0m\n"
+
+        # Set global interruption flag
+        export INTERRUPTED=1
+    fi
+}
+
+# Signal handler for termination signal
+handle_terminate() {
+    if [ "$INTERRUPTED" -eq 0 ]; then
+        INTERRUPTED=1
+        INTERRUPT_REASON="SIGTERM"
+        echo ""
+        printf "\033[1;33m*** Termination signal received ***\033[0m\n"
+        printf "\033[1;33mGracefully stopping downloads and saving progress...\033[0m\n"
+
+        # Set global interruption flag
+        export INTERRUPTED=1
+    fi
+}
+
+# Save current state for resumption
+save_interrupt_state() {
+    if [ -z "$STATE_FILE" ]; then
+        return
+    fi
+
+    # Save to both the session-specific and fixed resume state files
+    cat > "$STATE_FILE" << EOF
+# bdixdl interruption state - $(date)
+INTERRUPT_REASON=$INTERRUPT_REASON
+INTERRUPT_TIME=$(date +%s)
+TOTAL_FILES=$TOTAL_FILES
+DOWNLOADED_FILES=$DOWNLOADED_FILES
+SKIPPED_FILES=$SKIPPED_FILES
+CURRENT_DOWNLOAD_URL="$CURRENT_DOWNLOAD_URL"
+CURRENT_DOWNLOAD_FILE="$CURRENT_DOWNLOAD_FILE"
+MEDIA_FILES_COUNT=$MEDIA_FILES_COUNT
+POSTER_FILES_COUNT=$POSTER_FILES_COUNT
+SUBTITLE_FILES_COUNT=$SUBTITLE_FILES_COUNT
+START_TIME=$START_TIME
+DOWNLOADED_BYTES=$DOWNLOADED_BYTES
+TOTAL_FILES_TO_DOWNLOAD=$TOTAL_FILES_TO_DOWNLOAD
+CURRENT_FILE_NUMBER=$CURRENT_FILE_NUMBER
+DOWNLOAD_QUEUE_FILE="$DOWNLOAD_QUEUE_FILE"
+EOF
+
+    # Save current directory context if we're in the middle of processing
+    if [ -n "$CURRENT_BASE_URL" ]; then
+        echo "CURRENT_BASE_URL=\"$CURRENT_BASE_URL\"" >> "$STATE_FILE"
+    fi
+    if [ -n "$CURRENT_FOLDER_NAME" ]; then
+        echo "CURRENT_FOLDER_NAME=\"$CURRENT_FOLDER_NAME\"" >> "$STATE_FILE"
+    fi
+
+    # Also save the original BASE_URL and SEARCH_KEYWORDS for resume validation
+    if [ -n "$BASE_URL" ]; then
+        echo "BASE_URL=\"$BASE_URL\"" >> "$STATE_FILE"
+    fi
+    if [ -n "$SEARCH_KEYWORDS" ]; then
+        echo "SEARCH_KEYWORDS=\"$SEARCH_KEYWORDS\"" >> "$STATE_FILE"
+    fi
+
+    # Save session context if we have processed folders
+    if [ -f "$TEMP_DIR/matches" ] && [ "$RESUME_CONTEXT_SAVED" -eq 0 ]; then
+        # Save the folder matches that were selected for download
+        echo "SESSION_CONTEXT_SAVED=1" >> "$STATE_FILE"
+
+        # Save the first match as the resume context (or create a combined context)
+        if [ -s "$TEMP_DIR/matches" ]; then
+            first_match=$(head -n 1 "$TEMP_DIR/matches")
+            resume_url=$(echo "$first_match" | cut -d'|' -f1)
+            resume_name=$(echo "$first_match" | cut -d'|' -f3)
+
+            if [ -n "$resume_url" ] && [ -n "$resume_name" ]; then
+                echo "CURRENT_BASE_URL=\"$resume_url\"" >> "$STATE_FILE"
+                echo "CURRENT_FOLDER_NAME=\"$resume_name\"" >> "$STATE_FILE"
+                debug "Saved resume context: URL=$resume_url, NAME=$resume_name"
+            fi
+        fi
+    fi
+
+    # Also copy to the fixed resume state file for easier resuming
+    cp "$STATE_FILE" "$RESUME_STATE_FILE"
+}
+
+# Show interruption summary
+show_interrupt_summary() {
+    if [ "$INTERRUPTED" -eq 0 ]; then
+        return
+    fi
+
+    echo ""
+    printf "\033[1;31m=== Download Session Interrupted ===\033[0m\n"
+    printf "\033[1mReason:\033[0m $INTERRUPT_REASON\n"
+    # Use TOTAL_FILES_TO_DOWNLOAD if available, otherwise fall back to TOTAL_FILES
+    local total_files=$TOTAL_FILES
+    [ "$TOTAL_FILES_TO_DOWNLOAD" -gt 0 ] && total_files=$TOTAL_FILES_TO_DOWNLOAD
+
+    printf "\033[1mFiles processed:\033[0m $DOWNLOADED_FILES/$total_files\n"
+
+    # Use the correct skipped files counter
+    local skipped_files=$SKIPPED_FILES
+    local total_skipped=$((MEDIA_SKIPPED_COUNT + POSTER_SKIPPED_COUNT + SUBTITLE_SKIPPED_COUNT))
+    [ "$total_skipped" -gt 0 ] && skipped_files=$total_skipped
+
+    printf "\033[1mFiles skipped:\033[0m $skipped_files\n"
+
+    if [ "$DOWNLOADED_FILES" -gt 0 ]; then
+        local elapsed=$(( $(date +%s) - START_TIME ))
+        if [ "$elapsed" -gt 0 ]; then
+            local rate=$(( DOWNLOADED_BYTES / elapsed ))
+            printf "\033[1mData downloaded:\033[0m $(format_bytes $DOWNLOADED_BYTES)\n"
+            printf "\033[1mAverage speed:\033[0m $(format_bytes $rate)/s\n"
+        fi
+    fi
+
+    if [ -n "$CURRENT_DOWNLOAD_FILE" ]; then
+        # Use quotes and ensure the full filename is displayed
+        printf "\033[1mCurrent download was:\033[0m %s\n" "$CURRENT_DOWNLOAD_FILE"
+        printf "\033[1mThis file can be resumed with --resume flag\033[0m\n"
+    fi
+
+    echo ""
+    printf "\033[1;32mTo resume this session, run:\033[0m\n"
+    printf "  \033[1m$SCRIPT_NAME --resume [other-options]\033[0m\n"
+    echo ""
+    printf "\033[1mState saved to:\033[0m $RESUME_STATE_FILE\n"
+    printf "\033[1m(Also saved as:\033[0m $STATE_FILE\033[1m)\033[0m\n"
+}
+
+# Check if we should continue processing (not interrupted)
+should_continue() {
+    [ "$INTERRUPTED" -eq 0 ] && return 0
+    return 1
+}
+
+# Load saved session state for resumption
+load_session_state() {
+    # Check both the fixed resume state file and the session-specific one
+    if [ ! -f "$RESUME_STATE_FILE" ] && [ ! -f "$STATE_FILE" ]; then
+        error "No saved session state found. Cannot resume."
+        error "Expected state file: $RESUME_STATE_FILE or $STATE_FILE"
+        exit 1
+    fi
+
+    # Use the fixed resume state file if available, otherwise try the session-specific one
+    local state_file="$RESUME_STATE_FILE"
+    if [ ! -f "$RESUME_STATE_FILE" ] && [ -f "$STATE_FILE" ]; then
+        state_file="$STATE_FILE"
+    fi
+
+    log "Loading saved session state from: $state_file"
+
+    # Source the state file (safe approach with eval)
+    while IFS='=' read -r key value; do
+        # Skip comments and empty lines
+        case "$key" in
+            \#*|'') continue ;;
+        esac
+
+        # Remove surrounding quotes if present
+        if [ "${value#\"}" != "$value" ]; then
+            value="${value#\"}"
+            value="${value%\"}"
+        fi
+
+        # Restore variables
+        case "$key" in
+            INTERRUPT_REASON) INTERRUPT_REASON="$value" ;;
+            INTERRUPT_TIME) INTERRUPT_TIME="$value" ;;
+            TOTAL_FILES) TOTAL_FILES="$value" ;;
+            DOWNLOADED_FILES) DOWNLOADED_FILES="$value" ;;
+            SKIPPED_FILES) SKIPPED_FILES="$value" ;;
+            CURRENT_DOWNLOAD_URL) CURRENT_DOWNLOAD_URL="$value" ;;
+            CURRENT_DOWNLOAD_FILE) CURRENT_DOWNLOAD_FILE="$value" ;;
+            MEDIA_FILES_COUNT) MEDIA_FILES_COUNT="$value" ;;
+            POSTER_FILES_COUNT) POSTER_FILES_COUNT="$value" ;;
+            SUBTITLE_FILES_COUNT) SUBTITLE_FILES_COUNT="$value" ;;
+            START_TIME) START_TIME="$value" ;;
+            DOWNLOADED_BYTES) DOWNLOADED_BYTES="$value" ;;
+            CURRENT_BASE_URL) CURRENT_BASE_URL="$value" ;;
+            CURRENT_FOLDER_NAME) CURRENT_FOLDER_NAME="$value" ;;
+            BASE_URL) BASE_URL="$value" ;;
+            SEARCH_KEYWORDS) SEARCH_KEYWORDS="$value" ;;
+            TOTAL_FILES_TO_DOWNLOAD) TOTAL_FILES_TO_DOWNLOAD="$value" ;;
+            CURRENT_FILE_NUMBER) CURRENT_FILE_NUMBER="$value" ;;
+            DOWNLOAD_QUEUE_FILE) DOWNLOAD_QUEUE_FILE="$value" ;;
+            SESSION_CONTEXT_SAVED) RESUME_CONTEXT_SAVED=1 ;;
+        esac
+    done < "$state_file"
+
+    log "Session state loaded successfully"
+    log "Previous session interrupted: $INTERRUPT_REASON"
+    log "Previously downloaded: $DOWNLOADED_FILES files"
+    log "Previously downloaded data: $(format_bytes $DOWNLOADED_BYTES)"
+
+    # Clear the state file after loading
+    rm -f "$STATE_FILE"
+}
+
+# Check if we're in resume mode and there's a state file
+check_resume_mode() {
+    if [ "$RESUME" -eq 1 ] && [ -n "$STATE_FILE" ] && [ -f "$STATE_FILE" ]; then
+        return 0
+    fi
+    return 1
+}
+
 cleanup() {
-    [ -d "$TEMP_DIR" ] && rm -rf "$TEMP_DIR"
+    # Prevent multiple cleanups running simultaneously
+    if [ "$CLEANUP_IN_PROGRESS" -eq 1 ]; then
+        return
+    fi
+    CLEANUP_IN_PROGRESS=1
+
+    # Save current state if interrupted
+    if [ "$INTERRUPTED" -eq 1 ]; then
+        save_interrupt_state
+        show_interrupt_summary
+    fi
+
+    # Clean up temporary directory
+    if [ -d "$TEMP_DIR" ]; then
+        if [ "$INTERRUPTED" -eq 1 ]; then
+            # Preserve download queue and matches for resume
+            debug "Preserving download queue for resume: $DOWNLOAD_QUEUE_FILE"
+            debug "Preserving matches for resume: $TEMP_DIR/matches"
+        else
+            # Clean up everything on normal exit
+            rm -rf "$TEMP_DIR"
+        fi
+    fi
+
+    # Clean up state files on normal exit
+    if [ "$INTERRUPTED" -eq 0 ]; then
+        [ -f "$STATE_FILE" ] && rm -f "$STATE_FILE"
+        [ -f "$RESUME_STATE_FILE" ] && rm -f "$RESUME_STATE_FILE"
+    fi
+
     # Kill background jobs if any
     jobs -p 2>/dev/null | while read -r pid; do
         kill "$pid" 2>/dev/null || true
@@ -1202,9 +1463,17 @@ complete_download_progress() {
 
     printf "\r\033[K"  # Clear line
     printf "\n"
-    printf "✓ Download completed! %d files, %s\n" \
-           "$DOWNLOADED_FILES" \
-           "$(format_bytes "$DOWNLOADED_BYTES")"
+
+    # Check if download was interrupted
+    if [ "$INTERRUPTED" -eq 1 ]; then
+        printf "⏸ Download interrupted by user! %d files downloaded, %s\n" \
+               "$DOWNLOADED_FILES" \
+               "$(format_bytes "$DOWNLOADED_BYTES")"
+    else
+        printf "✓ Download completed! %d files, %s\n" \
+               "$DOWNLOADED_FILES" \
+               "$(format_bytes "$DOWNLOADED_BYTES")"
+    fi
 }
 
 # Download a single file with progress
@@ -1214,6 +1483,13 @@ download_file() {
     filename="$3"
     file_size="$4"
     file_type="$5"
+
+    # Check if we should continue (not interrupted)
+    should_continue || return 1
+
+    # Track current download for interruption handling
+    CURRENT_DOWNLOAD_URL="$file_url"
+    CURRENT_DOWNLOAD_FILE="$filename"
 
     local_dir=$(dirname "$local_path")
     mkdir -p "$local_dir" || return 1
@@ -1298,10 +1574,18 @@ download_file() {
         local_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
         curl_opts="$curl_opts --continue-at $local_size"
         debug "    Resuming from byte position: $local_size"
+        log "    RESUME: Continuing from $(format_bytes "$local_size")"
+
+        # Backup current file in case resume fails
+        if [ "$local_size" -gt 0 ]; then
+            cp "$local_path" "${local_path}.resume_backup" 2>/dev/null || true
+            debug "    Created backup: ${local_path}.resume_backup"
+        fi
     elif [ "$RESUME" -eq 1 ]; then
         # General resume flag (fallback)
         curl_opts="$curl_opts --continue-at -"
         debug "    Using automatic resume detection"
+        log "    RESUME: Automatic detection"
     fi
 
     # Track initial file size for progress calculation
@@ -1310,7 +1594,69 @@ download_file() {
         initial_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
     fi
 
-    if curl $curl_opts -o "$local_path" "$file_url"; then
+    # Check interruption before starting download
+    should_continue || return 1
+
+    # Start download with background monitoring
+    log "  ↓ $filename ($(format_bytes "$file_size") - downloading...)"
+
+    # Run curl in background to monitor for interruptions
+    debug "    Executing: curl $curl_opts -o \"$local_path\" \"$file_url\""
+    curl $curl_opts -o "$local_path" "$file_url" &
+    curl_pid=$!
+
+    # Monitor curl progress and check for interruptions
+    while kill -0 "$curl_pid" 2>/dev/null; do
+        # Check if user interrupted
+        if ! should_continue; then
+            # Kill the curl process gracefully
+            kill -TERM "$curl_pid" 2>/dev/null || true
+            wait "$curl_pid" 2>/dev/null || true
+            echo ""
+            log "  ⏸ $filename (download interrupted - can be resumed)"
+            return 1
+        fi
+
+        # Check progress every 2 seconds
+        sleep 2
+
+        # Show progress if file is large enough
+        if [ "$file_size" -gt 1048576 ]; then  # > 1MB
+            current_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+            if [ "$current_size" -gt "$initial_size" ]; then
+                # Calculate total progress of the entire file, not just the remaining portion
+                progress=$(( current_size * 100 / ($file_size + 1) ))
+                printf "\r  ↓ %s (%d%% - %s/%s)" "$filename" "$progress" "$(format_bytes "$current_size")" "$(format_bytes "$file_size")"
+            fi
+        fi
+    done
+
+    # Wait for curl to complete and check exit status
+    wait "$curl_pid"
+    curl_exit_code=$?
+
+    # Clear progress line if shown
+    [ "$file_size" -gt 1048576 ] && printf "\r"
+
+    # Verify resume worked correctly
+    if [ "$will_resume" -eq 1 ] && [ "$initial_size" -gt 0 ]; then
+        final_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+        if [ "$final_size" -lt "$initial_size" ]; then
+            debug "  WARNING: Resume may have failed - final size ($final_size) < initial size ($initial_size)"
+            log "  ⚠ Resume warning: File size decreased from $(format_bytes "$initial_size") to $(format_bytes "$final_size")"
+            # Try to restore from backup if it exists
+            if [ -f "${local_path}.resume_backup" ]; then
+                log "  ↻ Restoring from backup due to resume failure"
+                mv "${local_path}.resume_backup" "$local_path" 2>/dev/null || true
+            fi
+        else
+            debug "  Resume verification: Initial=$initial_size, Final=$final_size, Downloaded=$((final_size - initial_size))"
+            # Remove backup if resume succeeded
+            rm -f "${local_path}.resume_backup" 2>/dev/null || true
+        fi
+    fi
+
+    if [ "$curl_exit_code" -eq 0 ]; then
         # Get final file size
         final_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
 
@@ -1321,18 +1667,26 @@ download_file() {
         debug "  Remote size: $remote_size bytes"
 
         # Verify download completion
+        download_complete=1
         if [ "$remote_size" -gt 0 ]; then
             if [ "$final_size" -eq "$remote_size" ]; then
                 debug "  SUCCESS: File size matches remote ($final_size = $remote_size)"
             elif [ "$final_size" -lt "$remote_size" ]; then
-                debug "  WARNING: File still incomplete ($final_size < $remote_size)"
-                log "  ⚠ $filename (download may be incomplete: $(format_bytes "$final_size")/$(format_bytes "$remote_size"))"
+                debug "  ERROR: File still incomplete ($final_size < $remote_size)"
+                log "  ✗ $filename (download incomplete: $(format_bytes "$final_size")/$(format_bytes "$remote_size"))"
+                download_complete=0
             elif [ "$final_size" -gt "$remote_size" ]; then
                 debug "  WARNING: File larger than expected ($final_size > $remote_size)"
                 log "  ⚠ $filename (file larger than expected: $(format_bytes "$final_size") vs $(format_bytes "$remote_size"))"
+                # Don't treat this as an error, just a warning
             fi
         else
             debug "  SUCCESS: Download completed (remote size unknown)"
+        fi
+
+        # If download is incomplete, return failure so it can be retried
+        if [ "$download_complete" -eq 0 ]; then
+            return 1
         fi
 
         # Calculate downloaded bytes (for resumed downloads, only count the new portion)
@@ -1385,6 +1739,13 @@ download_directory_files() {
     remote_url="$1"
     local_base="$2"
     folder_name="$3"
+
+    # Check for interruption before processing directory
+    should_continue || return 1
+
+    # Track current directory for interruption handling
+    CURRENT_BASE_URL="$remote_url"
+    CURRENT_FOLDER_NAME="$folder_name"
 
     log "Processing: $folder_name"
     debug "  DEBUG: Received folder_name='$folder_name'"
@@ -1542,6 +1903,12 @@ download_directory_files() {
             while IFS='|' read -r action file_url local_path filename || [ -n "$action" ]; do
                 [ "$action" != "DOWNLOAD" ] && continue
 
+                # Check for interruption before each download
+                if ! should_continue; then
+                    log "  ⏸ Processing interrupted by user"
+                    break
+                fi
+
                 # Download file (not in background)
                 download_file "$file_url" "$local_path" "$filename"
             done < "$temp_file"
@@ -1560,7 +1927,13 @@ download_directory_files() {
         while IFS='|' read -r subdir_url subdir_name || [ -n "$subdir_url" ]; do
             [ -z "$subdir_url" ] && continue
 
-        debug "  Recursing into subdirectory: $subdir_name"
+            # Check for interruption before processing subdirectory
+            if ! should_continue; then
+                log "  ⏸ Directory processing interrupted by user"
+                break
+            fi
+
+            debug "  Recursing into subdirectory: $subdir_name"
             debug "  DEBUG: About to call download_directory_files with folder_name='$subdir_name'"
             # Recursively download from subdirectory - use original local_base to avoid nested directories
             download_directory_files "$subdir_url" "$local_base" "$subdir_name"
@@ -1594,7 +1967,12 @@ parse_arguments() {
                 shift
                 ;;
             -r|--resume)
-                RESUME=1
+                # Check if this is a session resume (no BASE_URL provided yet)
+                if [ $# -eq 1 ] || ([ "$2" = "-d" ] && [ $# -le 3 ]) || ([ "$2" = "-t" ] && [ $# -le 3 ]) || ([ "$2" = "--max-size" ] && [ $# -le 3 ]); then
+                    SESSION_RESUME=1
+                else
+                    RESUME=1
+                fi
                 shift
                 ;;
             -f|--force-overwrite)
@@ -1663,9 +2041,33 @@ parse_arguments() {
         esac
     done
 
-    # Validate required arguments
-    [ -z "$BASE_URL" ] && die "BASE_URL is required. Use -h for help."
-    [ -z "$SEARCH_KEYWORDS" ] && die "SEARCH_KEYWORDS are required. Use -h for help."
+    # Check if we're resuming from a saved state (session resume, not individual file resume)
+    if [ "$SESSION_RESUME" -eq 1 ]; then
+        if [ -f "$STATE_FILE" ] || [ -f "$RESUME_STATE_FILE" ]; then
+            # Resume mode - load state first, then validate
+            log "Checking for saved session state..."
+            load_session_state
+
+            # Use restored values for BASE_URL and SEARCH_KEYWORDS if available
+            # (These will be available if we saved CURRENT_BASE_URL)
+            if [ -n "$CURRENT_BASE_URL" ]; then
+                BASE_URL="$CURRENT_BASE_URL"
+                log "Restored BASE_URL from saved state"
+            elif [ -n "$BASE_URL" ]; then
+                log "Using original BASE_URL from saved state"
+            fi
+
+            # For resume mode, we don't need SEARCH_KEYWORDS since we're continuing
+            # from a specific directory context
+        else
+            # Resume requested but no state file found
+            die "No saved session state found. Cannot resume.\n       Expected state file: $RESUME_STATE_FILE\n       Tip: Use resume only after interrupting a running session with Ctrl+C."
+        fi
+    else
+        # Normal mode - validate required arguments
+        [ -z "$BASE_URL" ] && die "BASE_URL is required. Use -h for help."
+        [ -z "$SEARCH_KEYWORDS" ] && die "SEARCH_KEYWORDS are required. Use -h for help."
+    fi
 
     # Ensure BASE_URL ends with /
     case "$BASE_URL" in
@@ -1688,8 +2090,10 @@ parse_arguments() {
 
 # Main execution function
 main() {
-    # Set up signal handlers
-    trap cleanup EXIT INT TERM
+    # Set up signal handlers for graceful interruption
+    trap handle_interrupt INT
+    trap handle_terminate TERM
+    trap cleanup EXIT
 
     # Check dependencies and load config
     check_dependencies
@@ -1698,7 +2102,14 @@ main() {
     # Parse arguments (this may override config values)
     parse_arguments "$@"
 
-    # Create temporary directory
+    # Create temporary directory (clean up old temp directories first)
+    for old_temp_dir in /tmp/${SCRIPT_NAME}_*; do
+        if [ -d "$old_temp_dir" ] && [ "$old_temp_dir" != "$TEMP_DIR" ]; then
+            debug "Cleaning up old temporary directory: $old_temp_dir"
+            rm -rf "$old_temp_dir" 2>/dev/null || true
+        fi
+    done
+
     mkdir -p "$TEMP_DIR" || die "Cannot create temporary directory"
 
     log "$SCRIPT_NAME v$VERSION starting..."
@@ -1710,38 +2121,93 @@ main() {
     log "Max depth: $MAX_SEARCH_DEPTH"
     log "Threads: $MAX_THREADS"
 
-    # Find matching folders
-    log "Searching for matching folders..."
-    find_matching_folders "$BASE_URL" 0 ""
+    # Check if we're resuming from a saved session (state already loaded during validation)
+    if [ "$SESSION_RESUME" -eq 1 ] && ([ -f "$STATE_FILE" ] || [ -f "$RESUME_STATE_FILE" ]); then
+        log "Resuming interrupted session..."
 
-    # Debug: show all matches found
-    if [ -f "$TEMP_DIR/matches" ]; then
-        debug "DEBUG: All matches found:"
-        while IFS='|' read -r url path name; do
-            debug "  URL: $url"
-            debug "  Path: $path"
-            debug "  Name: $name"
+        # Check if we have download queue to resume from
+        if [ -f "$DOWNLOAD_QUEUE_FILE" ] && [ -s "$DOWNLOAD_QUEUE_FILE" ]; then
+            log "Found download queue, resuming from queue..."
+
+            # Re-scan to get file counts and summary if needed
+            if [ "$TOTAL_FILES_TO_DOWNLOAD" -eq 0 ]; then
+                log "Re-scanning files to get accurate counts..."
+                scan_and_analyze_files
+            fi
+
+        elif [ -n "$CURRENT_BASE_URL" ] && [ -n "$CURRENT_FOLDER_NAME" ]; then
+            # Create a matches file with the current directory context
+            printf '%s|%s|%s\n' "$CURRENT_BASE_URL" "$CURRENT_FOLDER_NAME" "$CURRENT_FOLDER_NAME" > "$TEMP_DIR/matches"
+            log "Resuming from: $CURRENT_FOLDER_NAME"
+            log "Continuing download process..."
+
+        else
+            # Try to reconstruct from saved state if we have download queue info
+            if [ "$TOTAL_FILES_TO_DOWNLOAD" -gt 0 ]; then
+                log "Resuming from saved download progress..."
+                # We'll recreate the download queue by scanning the original matches
+                if [ -n "$BASE_URL" ] && [ -n "$SEARCH_KEYWORDS" ]; then
+                    log "Re-scanning for folders to reconstruct download queue..."
+                    find_matching_folders "$BASE_URL" 0 ""
+
+                    if [ ! -f "$TEMP_DIR/matches" ] || [ ! -s "$TEMP_DIR/matches" ]; then
+                        error "Could not reconstruct download context. Please start a new session."
+                        exit 1
+                    fi
+
+                    # Scan and analyze files again
+                    scan_and_analyze_files
+                else
+                    error "Insufficient information to resume. Please start a new session."
+                    exit 1
+                fi
+            else
+                error "Incomplete session state. Cannot resume properly."
+                exit 1
+            fi
+        fi
+
+    else
+        # Normal mode - find matching folders
+        log "Searching for matching folders..."
+        find_matching_folders "$BASE_URL" 0 ""
+
+        # Debug: show all matches found
+        if [ -f "$TEMP_DIR/matches" ]; then
+            debug "DEBUG: All matches found:"
+            while IFS='|' read -r url path name; do
+                debug "  URL: $url"
+                debug "  Path: $path"
+                debug "  Name: $name"
+            done < "$TEMP_DIR/matches"
+        fi
+
+        # Check if we found any matches
+        if [ ! -f "$TEMP_DIR/matches" ] || [ ! -s "$TEMP_DIR/matches" ]; then
+            log "No folders found matching keywords: $SEARCH_KEYWORDS"
+            exit 0
+        fi
+    fi
+
+    # Display matches and handle selection (skip if resuming)
+    if [ "$SESSION_RESUME" -eq 1 ] && ([ -f "$STATE_FILE" ] || [ -f "$RESUME_STATE_FILE" ]); then
+        # Resume mode - skip selection, use the single match we created
+        log "Resuming from interrupted session..."
+        count=1
+        selected_indices="1"
+    else
+        # Normal mode - display matches and get user selection
+        log "Found matching folders:"
+        count=0
+        selected_indices=""
+        while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
+            count=$((count + 1))
+            printf "  %d. %s\n" "$count" "$folder_name"
+            debug "     URL: $folder_url"
         done < "$TEMP_DIR/matches"
-    fi
 
-    # Check if we found any matches
-    if [ ! -f "$TEMP_DIR/matches" ] || [ ! -s "$TEMP_DIR/matches" ]; then
-        log "No folders found matching keywords: $SEARCH_KEYWORDS"
-        exit 0
-    fi
-
-    # Display matches with clean formatting
-    log "Found matching folders:"
-    count=0
-    selected_indices=""
-    while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
-        count=$((count + 1))
-        printf "  %d. %s\n" "$count" "$folder_name"
-        debug "     URL: $folder_url"
-    done < "$TEMP_DIR/matches"
-
-    # Folder selection logic
-    if [ "$DRY_RUN" -eq 0 ]; then
+        # Folder selection logic
+        if [ "$DRY_RUN" -eq 0 ]; then
         printf "\nEnter folders to download (comma-separated numbers, 'a' for all): "
         read -r response
         case "$response" in
@@ -1759,8 +2225,9 @@ main() {
 
         [ -z "$selected_indices" ] && { log "No valid selections made. Exiting."; exit 0; }
     else
-        selected_indices=$(seq -s, 1 $count)
-    fi
+            selected_indices=$(seq -s, 1 $count)
+        fi
+    fi  # End of normal mode selection logic
 
     # Filter matches based on selection
     filtered_matches="$TEMP_DIR/filtered_matches"
@@ -1851,8 +2318,38 @@ main() {
 
             debug "Processing: $filename ($(format_bytes "$file_size"))"
 
-            # Download file with progress tracking
-            download_file "$file_url" "$local_path" "$filename" "$file_size" "$file_type"
+            # Download file with progress tracking and retry logic
+            max_retries=3
+            retry_count=0
+            download_success=0
+
+            while [ "$retry_count" -lt "$max_retries" ] && [ "$download_success" -eq 0 ]; do
+                if [ "$retry_count" -gt 0 ]; then
+                    log "  ↻ Retrying $filename (attempt $((retry_count + 1))/$max_retries)"
+                    # Small delay before retry
+                    sleep 2
+                fi
+
+                # Download file with progress tracking
+                if download_file "$file_url" "$local_path" "$filename" "$file_size" "$file_type"; then
+                    download_success=1
+                    debug "  DOWNLOAD SUCCESS: $filename completed successfully"
+                else
+                    retry_count=$((retry_count + 1))
+                    debug "  DOWNLOAD FAILED: $filename failed (attempt $retry_count/$max_retries)"
+
+                    # Check if we should continue processing
+                    if ! should_continue; then
+                        debug "  INTERRUPTED: Stopping download retries"
+                        break
+                    fi
+                fi
+            done
+
+            if [ "$download_success" -eq 0 ]; then
+                error "  ✗ Failed to download $filename after $max_retries attempts"
+                # Continue to next file instead of stopping the entire process
+            fi
 
             debug "=== COMPLETED QUEUE ITEM #$processed_count ==="
         done < "$DOWNLOAD_QUEUE_COPY"
