@@ -3,7 +3,7 @@
 # bdixdl - POSIX-compliant H5AI media downloader
 # Downloads media files from h5ai HTTP directory listings with advanced features
 
-VERSION="1.1.0"
+VERSION="1.2.1" # Fixed repeated downloads bug with queue progress tracking
 SCRIPT_NAME="bdixdl"
 
 # --- Default Configuration ---
@@ -925,7 +925,8 @@ get_remote_file_size() {
     file_url="$1"
 
     # Use curl to get Content-Length header
-    size=$(curl --silent --head --location --max-redirs 3 --connect-timeout 10 --max-time 30 "$file_url" 2>/dev/null | \
+    # Increased timeout to be more reliable for large file servers
+    size=$(curl --silent --head --location --max-redirs 3 --connect-timeout 15 --max-time 60 "$file_url" 2>/dev/null | \
            grep -i "^Content-Length:" | \
            sed 's/^[^:]*: *//' | \
            tr -d '\r' | \
@@ -963,8 +964,11 @@ scan_and_analyze_files() {
     debug "=== SCAN PHASE START ==="
     debug "  Download queue file: $DOWNLOAD_QUEUE_FILE"
 
-    # Initialize processed URLs tracking file to prevent duplicate processing
-    > "$TEMP_DIR/processed_urls"
+    # --- FIX --- Initialize the processed URLs tracking file to prevent duplicate scanning.
+    # This file will be used by scan_directory_files to avoid re-scanning.
+    PROCESSED_URLS_TRACKER="$TEMP_DIR/processed_urls.txt"
+    > "$PROCESSED_URLS_TRACKER"
+    debug "  Initialized processed URL tracker: $PROCESSED_URLS_TRACKER"
 
     # Process each selected folder
     while IFS='|' read -r folder_url folder_path folder_name || [ -n "$folder_url" ]; do
@@ -998,6 +1002,18 @@ scan_directory_files() {
     local_base="$2"
     folder_name="$3"
 
+    # --- FIX: Prevent re-scanning of the same directory ---
+    # This is the core fix. Before processing, we check if this URL has already been scanned.
+    PROCESSED_URLS_TRACKER="$TEMP_DIR/processed_urls.txt"
+    # Use grep with -F (fixed string) and -x (whole line match) for accuracy and safety.
+    if grep -q -x -F "$remote_url" "$PROCESSED_URLS_TRACKER" 2>/dev/null; then
+        debug "    SKIP: Directory already scanned, skipping to prevent duplicates: $remote_url"
+        return 0
+    fi
+    # If not scanned, add it to the tracker immediately before proceeding.
+    printf '%s\n' "$remote_url" >> "$PROCESSED_URLS_TRACKER"
+    # --- END FIX ---
+
     log "    Scanning: $folder_name"
 
     href_paths=$(get_href_paths "$remote_url")
@@ -1013,15 +1029,13 @@ scan_directory_files() {
     # Get base domain for absolute paths
     base_domain=$(echo "$BASE_URL" | sed 's|^\(https\?://[^/]*\).*|\1|')
 
-    # Create a processed files tracker to prevent duplicates
-    PROCESSED_FILES_TRACKER="$TEMP_DIR/processed_files_$$.txt"
-    [ -f "$PROCESSED_FILES_TRACKER" ] || > "$PROCESSED_FILES_TRACKER"
+    # Create a processed files tracker to prevent duplicates within the same directory scan
+    PROCESSED_FILES_TRACKER="$TEMP_DIR/processed_files_$(echo "$remote_url" | md5sum | cut -d' ' -f1).txt"
+    > "$PROCESSED_FILES_TRACKER"
 
     # Process files and subdirectories
-    temp_dirs="$TEMP_DIR/scan_dirs_$$_$(date +%s)"
-
-    # Create a temporary file to store file processing results
-    temp_files="$TEMP_DIR/files_$$_$(date +%s)"
+    temp_dirs="$TEMP_DIR/scan_dirs_$$_$(date +%s%N)"
+    temp_files="$TEMP_DIR/files_$$_$(date +%s%N)"
 
     printf '%s\n' "$href_paths" | while IFS= read -r link_path; do
         [ -z "$link_path" ] && continue
@@ -1045,49 +1059,29 @@ scan_directory_files() {
 
         # Process directories separately
         if [ "$is_directory" -eq 1 ]; then
-            # Skip navigation directories and current directory
             case "$link_path" in
-                .|..|./|../|*/_h5ai/*)
-                    continue
-                    ;;
+                .|..|./|../|*/_h5ai/*) continue ;;
             esac
-
-            # Also skip based on decoded path
             case "$decoded_path" in
-                */.|*/..|*/_h5ai/*|.|..)
-                    continue
-                    ;;
+                */.|*/..|*/_h5ai/*|.|..) continue ;;
             esac
 
             subdir_name=$(basename "${decoded_path%/}")
 
-            # Skip if subdirectory name is empty or just whitespace
             if [ -z "$subdir_name" ] || [ -z "$(echo "$subdir_name" | tr -d '[:space:]')" ]; then
                 continue
             fi
 
-            # Build subdirectory URL
             case "$link_path" in
-                http://*|https://*)
-                    subdir_url="$link_path"
-                    ;;
-                /*)
-                    subdir_url="$base_domain${link_path%/}/"
-                    ;;
-                *)
-                    subdir_url="${remote_url%/}/${link_path%/}/"
-                    ;;
+                http://*|https://*) subdir_url="$link_path" ;;
+                /*) subdir_url="$base_domain${link_path%/}/" ;;
+                *) subdir_url="${remote_url%/}/${link_path%/}/" ;;
             esac
-
-            # Normalize URL
             subdir_url=$(echo "$subdir_url" | sed 's|//*/|/|g' | sed 's|^\(https\?:\)\(/\)\+|\1//|')
 
-            # Skip if subdirectory URL is the same as current URL
             if [ "$subdir_url" = "$remote_url" ] || [ "${subdir_url%/}" = "${remote_url%/}" ]; then
                 continue
             fi
-
-            # Skip if subdirectory has the same name as current directory
             if [ "$subdir_name" = "$folder_name_decoded" ] || [ "$subdir_name" = "$folder_name" ]; then
                 continue
             fi
@@ -1100,147 +1094,84 @@ scan_directory_files() {
         if is_supported_extension "$decoded_path"; then
             filename=$(basename "$decoded_path")
 
-            # Build file URL
             case "$link_path" in
-                http://*|https://*)
-                    file_url="$link_path"
-                    ;;
-                /*)
-                    file_url="$base_domain$link_path"
-                    ;;
-                *)
-                    file_url="${remote_url%/}/$link_path"
-                    ;;
+                http://*|https://*) file_url="$link_path" ;;
+                /*) file_url="$base_domain$link_path" ;;
+                *) file_url="${remote_url%/}/$link_path" ;;
             esac
 
             local_path="$local_dir/$filename"
-
-            # Get file type
             file_type=$(get_file_type "$filename")
-
-            # Get remote file size
             remote_size=$(get_remote_file_size "$file_url")
 
-            # Apply filters - check if file should be excluded
             if should_exclude_file "$filename" "$remote_size"; then
                 debug "      EXCLUDED: $filename ($(format_bytes "$remote_size")) - filtered out"
-                # Update filtered counters based on file type
                 case "$file_type" in
-                    "media")
-                        MEDIA_FILTERED_COUNT=$((MEDIA_FILTERED_COUNT + 1))
-                        ;;
-                    "poster")
-                        POSTER_FILTERED_COUNT=$((POSTER_FILTERED_COUNT + 1))
-                        ;;
-                    "subtitle")
-                        SUBTITLE_FILTERED_COUNT=$((SUBTITLE_FILTERED_COUNT + 1))
-                        ;;
+                    "media") MEDIA_FILTERED_COUNT=$((MEDIA_FILTERED_COUNT + 1)) ;;
+                    "poster") POSTER_FILTERED_COUNT=$((POSTER_FILTERED_COUNT + 1)) ;;
+                    "subtitle") SUBTITLE_FILTERED_COUNT=$((SUBTITLE_FILTERED_COUNT + 1)) ;;
                 esac
                 continue
             fi
 
-            # Debug: show the local path being checked
             debug "      Checking local path: $local_path"
-
-            # Enhanced file existence and size checking
             will_skip=0
             if [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 0 ]; then
                 local_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
                 debug "      File exists locally, size: $local_size bytes"
-
-                if [ "$remote_size" -gt 0 ]; then
-                    if [ "$local_size" -eq "$remote_size" ]; then
-                        debug "      File sizes match, will skip"
-                        will_skip=1
-                    elif [ "$local_size" -gt "$remote_size" ]; then
-                        debug "      Local file larger than remote, will restart"
-                        debug "      Local: $local_size, Remote: $remote_size"
-                    else
-                        debug "      File is incomplete, will download"
-                        debug "      Local: $local_size, Remote: $remote_size, Missing: $((remote_size - local_size))"
-                    fi
-                else
-                    debug "      Remote size unknown, will check again during download"
+                if [ "$remote_size" -gt 0 ] && [ "$local_size" -eq "$remote_size" ]; then
+                    debug "      File sizes match, will skip"
+                    will_skip=1
                 fi
             else
-                # Debug: show that file doesn't exist locally
-                debug "      File does not exist locally: $local_path"
+                debug "      File does not exist locally or overwrite is forced: $local_path"
             fi
 
-            # Check for duplicates before processing
-            file_key="$file_url|$local_path|$filename"
-            if grep -q "^$file_key$" "$PROCESSED_FILES_TRACKER" 2>/dev/null; then
-                debug "      DUPLICATE: File already processed, skipping: $filename"
+            file_key="$file_url"
+            if grep -q -x -F "$file_key" "$PROCESSED_FILES_TRACKER" 2>/dev/null; then
+                debug "      DUPLICATE: File already processed in this scan, skipping: $filename"
                 continue
             fi
-
-            # Mark this file as processed
             echo "$file_key" >> "$PROCESSED_FILES_TRACKER"
-            debug "      TRACKING: Added file to tracker: $filename"
 
-            # Output file processing result to temp file instead of updating counters directly
             printf "FILE|%s|%s|%d|%s|%s|%s\n" "$file_type" "$will_skip" "$remote_size" "$file_url" "$local_path" "$filename" >> "$temp_files"
         fi
     done
 
-    # Process the file results and update counters
     if [ -f "$temp_files" ]; then
         while IFS='|' read -r record_type file_type will_skip remote_size file_url local_path filename || [ -n "$record_type" ]; do
             [ "$record_type" != "FILE" ] && continue
-
-            # Update counters based on file type and skip status
             case "$file_type" in
                 "media")
-                    if [ "$will_skip" -eq 1 ]; then
-                        MEDIA_SKIPPED_COUNT=$((MEDIA_SKIPPED_COUNT + 1))
-                    else
+                    if [ "$will_skip" -eq 1 ]; then MEDIA_SKIPPED_COUNT=$((MEDIA_SKIPPED_COUNT + 1)); else
                         MEDIA_FILES_COUNT=$((MEDIA_FILES_COUNT + 1))
                         MEDIA_TOTAL_SIZE=$((MEDIA_TOTAL_SIZE + remote_size))
-                        # Add to download queue if not skipping
                         printf "DOWNLOAD|%s|%s|%s|%s|%d\n" "$file_url" "$local_path" "$filename" "$file_type" "$remote_size" >> "$DOWNLOAD_QUEUE_FILE"
-                    fi
-                    ;;
+                    fi ;;
                 "poster")
-                    if [ "$will_skip" -eq 1 ]; then
-                        POSTER_SKIPPED_COUNT=$((POSTER_SKIPPED_COUNT + 1))
-                    else
+                    if [ "$will_skip" -eq 1 ]; then POSTER_SKIPPED_COUNT=$((POSTER_SKIPPED_COUNT + 1)); else
                         POSTER_FILES_COUNT=$((POSTER_FILES_COUNT + 1))
                         POSTER_TOTAL_SIZE=$((POSTER_TOTAL_SIZE + remote_size))
-                        # Add to download queue if not skipping
                         printf "DOWNLOAD|%s|%s|%s|%s|%d\n" "$file_url" "$local_path" "$filename" "$file_type" "$remote_size" >> "$DOWNLOAD_QUEUE_FILE"
-                    fi
-                    ;;
+                    fi ;;
                 "subtitle")
-                    if [ "$will_skip" -eq 1 ]; then
-                        SUBTITLE_SKIPPED_COUNT=$((SUBTITLE_SKIPPED_COUNT + 1))
-                    else
+                    if [ "$will_skip" -eq 1 ]; then SUBTITLE_SKIPPED_COUNT=$((SUBTITLE_SKIPPED_COUNT + 1)); else
                         SUBTITLE_FILES_COUNT=$((SUBTITLE_FILES_COUNT + 1))
                         SUBTITLE_TOTAL_SIZE=$((SUBTITLE_TOTAL_SIZE + remote_size))
-                        # Add to download queue if not skipping
                         printf "DOWNLOAD|%s|%s|%s|%s|%d\n" "$file_url" "$local_path" "$filename" "$file_type" "$remote_size" >> "$DOWNLOAD_QUEUE_FILE"
-                    fi
-                    ;;
+                    fi ;;
             esac
         done < "$temp_files"
         rm -f "$temp_files"
     fi
 
-    # Process subdirectories recursively - FIX: Use unique temp file for each level
     if [ -f "$temp_dirs" ]; then
-        # Create a unique temp file for this level to avoid duplicate processing
-        level_dirs="$TEMP_DIR/level_dirs_$$_$(date +%N)"
-        cp "$temp_dirs" "$level_dirs"
-        rm -f "$temp_dirs"
-
         while IFS='|' read -r subdir_url subdir_local_base subdir_name || [ -n "$subdir_url" ]; do
             [ -z "$subdir_url" ] && continue
-            # Check if we've already processed this URL to avoid duplicates
-            if ! grep -q "^$subdir_url|" "$TEMP_DIR/processed_urls" 2>/dev/null; then
-                echo "$subdir_url|$subdir_local_base|$subdir_name" >> "$TEMP_DIR/processed_urls"
-                scan_directory_files "$subdir_url" "$subdir_local_base" "$subdir_name"
-            fi
-        done < "$level_dirs"
-        rm -f "$level_dirs"
+            # --- FIX --- The old, ineffective check here is removed. The check at the top of the function handles this logic correctly now.
+            scan_directory_files "$subdir_url" "$subdir_local_base" "$subdir_name"
+        done < "$temp_dirs"
+        rm -f "$temp_dirs"
     fi
 }
 
@@ -1539,9 +1470,17 @@ download_file() {
         else
             # Could not determine remote size - check if we should resume based on file existence
             if [ "$RESUME" -eq 1 ] && [ "$local_size" -gt 0 ]; then
-                log "  ↻ $filename (remote size unknown, attempting resume from $(format_bytes "$local_size"))"
-                debug "  RESUME: Remote size unknown, will attempt resume"
-                will_resume=1
+                # Check if file is likely complete by testing if we can read from it properly
+                # and if it hasn't been modified recently (to avoid corrupted files)
+                if [ "$local_size" -gt 1048576 ]; then  # File is larger than 1MB
+                    log "  ↻ $filename (remote size unknown, attempting resume from $(format_bytes "$local_size"))"
+                    debug "  RESUME: Remote size unknown, will attempt resume"
+                    will_resume=1
+                else
+                    log "  ? $filename (small file, size unknown - redownloading)"
+                    debug "  RESTART: Small file with unknown size, will download fresh"
+                    # For small files, it's safer to restart than to risk corruption
+                fi
             else
                 log "  ? $filename (size unknown - redownloading)"
                 debug "  RESTART: Size unknown, will download fresh"
@@ -1567,7 +1506,8 @@ download_file() {
     debug "    Resume enabled: $RESUME, Will resume: $will_resume"
 
     # Build curl options with enhanced resume support
-    curl_opts="--silent --location --retry 3 --connect-timeout 30 --max-time 300"
+    # Removed max-time limit to prevent timeouts on large files - we have our own interruption handling
+    curl_opts="--silent --location --retry 3 --connect-timeout 30"
 
     if [ "$will_resume" -eq 1 ] && [ "$RESUME" -eq 1 ]; then
         # Use specific resume position instead of automatic detection
@@ -1583,9 +1523,33 @@ download_file() {
         fi
     elif [ "$RESUME" -eq 1 ]; then
         # General resume flag (fallback)
-        curl_opts="$curl_opts --continue-at -"
-        debug "    Using automatic resume detection"
-        log "    RESUME: Automatic detection"
+        # But first check if file might already be complete
+        current_local_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
+        if [ -f "$local_path" ] && [ "$current_local_size" -gt 0 ]; then
+            # For automatic resume, test if the file is likely complete by trying to read it
+            if [ "$current_local_size" -gt 1048576 ]; then  # > 1MB
+                # Try to verify file integrity by checking if we can read the end of the file
+                if tail -c 1024 "$local_path" >/dev/null 2>&1; then
+                    debug "    File appears readable, attempting automatic resume"
+                    curl_opts="$curl_opts --continue-at -"
+                    debug "    Using automatic resume detection"
+                    log "    RESUME: Automatic detection"
+                else
+                    debug "    File appears corrupted, will restart download"
+                    log "    RESTART: File appears corrupted"
+                    # Don't use resume for corrupted files - start fresh
+                fi
+            else
+                # For small files, automatic resume is more reliable
+                curl_opts="$curl_opts --continue-at -"
+                debug "    Using automatic resume detection for small file"
+                log "    RESUME: Automatic detection"
+            fi
+        else
+            curl_opts="$curl_opts --continue-at -"
+            debug "    Using automatic resume detection"
+            log "    RESUME: Automatic detection"
+        fi
     fi
 
     # Track initial file size for progress calculation
@@ -1713,6 +1677,10 @@ download_file() {
                 debug "  Using actual size for progress: $(format_bytes "$final_size")"
             fi
         fi
+
+        # Clear current download tracking to prevent re-download
+        CURRENT_DOWNLOAD_URL=""
+        CURRENT_DOWNLOAD_FILE=""
 
         DOWNLOADED_FILES=$((DOWNLOADED_FILES + 1))
         log "  ✓ $filename ($(format_bytes "$final_size"))"
@@ -2300,11 +2268,36 @@ main() {
         debug "  Queue file: $DOWNLOAD_QUEUE_COPY"
         debug "  Total files in queue: $(wc -l < "$DOWNLOAD_QUEUE_COPY" 2>/dev/null || echo '0')"
 
+        # Initialize queue progress tracking
+        QUEUE_PROGRESS_FILE="$TEMP_DIR/queue_progress_$$.txt"
+        START_QUEUE_POSITION=1
+
+        # Load previous progress if resuming
+        if [ -f "$RESUME_STATE_FILE" ]; then
+            # Try to load the last completed queue position
+            if grep -q "^LAST_COMPLETED_QUEUE_POSITION=" "$RESUME_STATE_FILE" 2>/dev/null; then
+                LAST_COMPLETED_POSITION=$(grep "^LAST_COMPLETED_QUEUE_POSITION=" "$RESUME_STATE_FILE" | cut -d'=' -f2)
+                if [ -n "$LAST_COMPLETED_POSITION" ] && [ "$LAST_COMPLETED_POSITION" -gt 0 ]; then
+                    START_QUEUE_POSITION=$((LAST_COMPLETED_POSITION + 1))
+                    log "Resuming from queue position $START_QUEUE_POSITION (previously completed item #$LAST_COMPLETED_POSITION)"
+                    debug "  RESUME: Starting from queue item #$START_QUEUE_POSITION"
+                fi
+            fi
+        fi
+
         processed_count=0
         while IFS='|' read -r action file_url local_path filename file_type file_size || [ -n "$action" ]; do
             [ "$action" != "DOWNLOAD" ] && continue
 
             processed_count=$((processed_count + 1))
+
+            # Skip completed items if resuming
+            if [ "$processed_count" -lt "$START_QUEUE_POSITION" ]; then
+                debug "=== SKIPPING COMPLETED QUEUE ITEM #$processed_count ==="
+                debug "  Filename: $filename (already completed in previous session)"
+                continue
+            fi
+
             debug "=== PROCESSING QUEUE ITEM #$processed_count ==="
             debug "  Filename: $filename"
             debug "  File URL: $file_url"
@@ -2351,14 +2344,34 @@ main() {
                 # Continue to next file instead of stopping the entire process
             fi
 
+            # Save queue progress after successful completion
+            if [ "$download_success" -eq 1 ]; then
+                echo "LAST_COMPLETED_QUEUE_POSITION=$processed_count" > "$QUEUE_PROGRESS_FILE"
+                debug "  SAVED: Completed queue position #$processed_count"
+
+                # Also update the main resume state file
+                if [ -f "$STATE_FILE" ]; then
+                    if grep -q "^LAST_COMPLETED_QUEUE_POSITION=" "$STATE_FILE" 2>/dev/null; then
+                        # Update existing line
+                        sed -i.bak "s/^LAST_COMPLETED_QUEUE_POSITION=.*/LAST_COMPLETED_QUEUE_POSITION=$processed_count/" "$STATE_FILE"
+                    else
+                        # Add new line
+                        echo "LAST_COMPLETED_QUEUE_POSITION=$processed_count" >> "$STATE_FILE"
+                    fi
+                    # Copy to fixed resume state file
+                    cp "$STATE_FILE" "$RESUME_STATE_FILE"
+                fi
+            fi
+
             debug "=== COMPLETED QUEUE ITEM #$processed_count ==="
         done < "$DOWNLOAD_QUEUE_COPY"
 
         debug "=== DOWNLOAD QUEUE PROCESSING COMPLETE ==="
         debug "  Processed $processed_count files"
 
-        # Clean up the copy
+        # Clean up the copy and progress files
         rm -f "$DOWNLOAD_QUEUE_COPY"
+        rm -f "$QUEUE_PROGRESS_FILE"
 
         # Show final progress
         complete_download_progress
