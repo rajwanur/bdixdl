@@ -30,6 +30,57 @@ RESUME=0               # Individual file resume (partial downloads)
 SESSION_RESUME=0        # Session resume (complete session state)
 FORCE_OVERWRITE=0
 CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+
+# Color support variables
+USE_COLORS=1  # Enable colors by default
+
+# Check for NO_COLOR environment variable or non-tty output
+if [ -n "$NO_COLOR" ]; then
+    USE_COLORS=0
+elif ! [ -t 1 ]; then
+    USE_COLORS=0
+elif [ -n "$TERM" ]; then
+    # Check if terminal supports colors
+    case "$TERM" in
+        dumb|unknown|emacs|xterm-termite|stterm*)
+            USE_COLORS=0
+            ;;
+        *)
+            # Test if terminal actually supports colors by trying to print them
+            # Redirect to /dev/null to avoid output during test
+            if ! printf "\033[31mTEST\033[0m" >/dev/null 2>&1; then
+                USE_COLORS=0
+            fi
+            ;;
+    esac
+else
+    # No TERM variable, assume no color support
+    USE_COLORS=0
+fi
+
+# ANSI Color codes
+if [ "$USE_COLORS" -eq 1 ]; then
+    COLOR_RESET='\033[0m'
+    COLOR_BOLD='\033[1m'
+    COLOR_RED='\033[1;31m'
+    COLOR_GREEN='\033[1;32m'
+    COLOR_YELLOW='\033[1;33m'
+    COLOR_BLUE='\033[1;34m'
+    COLOR_CYAN='\033[1;36m'
+    COLOR_GRAY='\033[2;37m'
+    COLOR_WHITE='\033[1;37m'
+else
+    # Reset to empty strings when colors are disabled
+    COLOR_RESET=''
+    COLOR_BOLD=''
+    COLOR_RED=''
+    COLOR_GREEN=''
+    COLOR_YELLOW=''
+    COLOR_BLUE=''
+    COLOR_CYAN=''
+    COLOR_GRAY=''
+    COLOR_WHITE=''
+fi
 # Use a more portable temporary directory location
 TEMP_DIR="${TMPDIR:-/tmp}/${SCRIPT_NAME}_$$"
 MATCHING_FOLDERS=""
@@ -78,16 +129,46 @@ EXCLUDE_REGEX=""         # Regular expression pattern to exclude from filenames
 
 # --- Utility Functions ---
 
+# Color helper functions
+colorize() {
+    local color="$1"
+    local text="$2"
+    if [ "$USE_COLORS" -eq 1 ] && [ -n "$color" ]; then
+        printf "${color}%s${COLOR_RESET}" "$text"
+    else
+        printf "%s" "$text"
+    fi
+}
+
+# Simplified color prefix functions for better compatibility
+color_prefix() {
+    local color="$1"
+    if [ "$USE_COLORS" -eq 1 ] && [ -n "$color" ] && [ "$color" != "\033[0m" ]; then
+        # Direct output for better compatibility
+        echo -n "$color"
+    fi
+}
+
+color_suffix() {
+    if [ "$USE_COLORS" -eq 1 ]; then
+        # Direct output for better compatibility
+        echo -n "$COLOR_RESET"
+    fi
+}
+
+# Update logging functions with colors
 log() {
     [ "$QUIET" -eq 0 ] && printf "[%s] %s\n" "$(date '+%H:%M:%S')" "$*"
 }
 
 debug() {
-    [ "$DEBUG" -eq 1 ] && [ "$QUIET" -eq 0 ] && printf "[DEBUG] %s\n" "$*"
+    if [ "$DEBUG" -eq 1 ] && [ "$QUIET" -eq 0 ]; then
+        printf "%s[DEBUG] %s%s\n" "$(color_prefix "$COLOR_GRAY")" "$*" "$(color_suffix)"
+    fi
 }
 
 error() {
-    printf "[ERROR] %s\n" "$*" >&2
+    printf "%s[ERROR] %s%s\n" "$(color_prefix "$COLOR_RED")" "$*" "$(color_suffix)" >&2
 }
 
 die() {
@@ -102,8 +183,8 @@ handle_interrupt() {
         INTERRUPTED=1
         INTERRUPT_REASON="SIGINT"
         echo ""
-        printf "\033[1;33m*** Interruption detected (Ctrl+C) ***\033[0m\n"
-        printf "\033[1;33mGracefully stopping downloads and saving progress...\033[0m\n"
+        printf "%s*** Interruption detected (Ctrl+C) ***%s\n" "$(colorize "$COLOR_YELLOW" "")" "$(colorize "$COLOR_RESET" "")"
+        printf "%sGracefully stopping downloads and saving progress...%s\n" "$(colorize "$COLOR_YELLOW" "")" "$(colorize "$COLOR_RESET" "")"
 
         # Set global interruption flag
         export INTERRUPTED=1
@@ -116,8 +197,8 @@ handle_terminate() {
         INTERRUPTED=1
         INTERRUPT_REASON="SIGTERM"
         echo ""
-        printf "\033[1;33m*** Termination signal received ***\033[0m\n"
-        printf "\033[1;33mGracefully stopping downloads and saving progress...\033[0m\n"
+        printf "%s*** Termination signal received ***%s\n" "$(colorize "$COLOR_YELLOW" "")" "$(colorize "$COLOR_RESET" "")"
+        printf "%sGracefully stopping downloads and saving progress...%s\n" "$(colorize "$COLOR_YELLOW" "")" "$(colorize "$COLOR_RESET" "")"
 
         # Set global interruption flag
         export INTERRUPTED=1
@@ -196,42 +277,43 @@ show_interrupt_summary() {
     fi
 
     echo ""
-    printf "\033[1;31m=== Download Session Interrupted ===\033[0m\n"
-    printf "\033[1mReason:\033[0m $INTERRUPT_REASON\n"
+    printf "%s=== Download Session Interrupted ===%s\n" "$(colorize "$COLOR_RED" "")" "$(colorize "$COLOR_RESET" "")"
+    printf "%sReason:%s %s\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$INTERRUPT_REASON"
+
     # Use TOTAL_FILES_TO_DOWNLOAD if available, otherwise fall back to TOTAL_FILES
     local total_files=$TOTAL_FILES
     [ "$TOTAL_FILES_TO_DOWNLOAD" -gt 0 ] && total_files=$TOTAL_FILES_TO_DOWNLOAD
 
-    printf "\033[1mFiles processed:\033[0m $DOWNLOADED_FILES/$total_files\n"
+    printf "%sFiles processed:%s %d/%d\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$DOWNLOADED_FILES" "$total_files"
 
     # Use the correct skipped files counter
     local skipped_files=$SKIPPED_FILES
     local total_skipped=$((MEDIA_SKIPPED_COUNT + POSTER_SKIPPED_COUNT + SUBTITLE_SKIPPED_COUNT))
     [ "$total_skipped" -gt 0 ] && skipped_files=$total_skipped
 
-    printf "\033[1mFiles skipped:\033[0m $skipped_files\n"
+    printf "%sFiles skipped:%s %d\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$skipped_files"
 
     if [ "$DOWNLOADED_FILES" -gt 0 ]; then
         local elapsed=$(( $(date +%s) - START_TIME ))
         if [ "$elapsed" -gt 0 ]; then
             local rate=$(( DOWNLOADED_BYTES / elapsed ))
-            printf "\033[1mData downloaded:\033[0m $(format_bytes $DOWNLOADED_BYTES)\n"
-            printf "\033[1mAverage speed:\033[0m $(format_bytes $rate)/s\n"
+            printf "%sData downloaded:%s %s\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$(format_bytes $DOWNLOADED_BYTES)"
+            printf "%sAverage speed:%s %s/s\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$(format_bytes $rate)"
         fi
     fi
 
     if [ -n "$CURRENT_DOWNLOAD_FILE" ]; then
         # Use quotes and ensure the full filename is displayed
-        printf "\033[1mCurrent download was:\033[0m %s\n" "$CURRENT_DOWNLOAD_FILE"
-        printf "\033[1mThis file can be resumed with --resume flag\033[0m\n"
+        printf "%sCurrent download was:%s %s\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$CURRENT_DOWNLOAD_FILE"
+        printf "%sThis file can be resumed with --resume flag%s\n" "$(colorize "$COLOR_CYAN" "")" "$(colorize "$COLOR_RESET" "")"
     fi
 
     echo ""
-    printf "\033[1;32mTo resume this session, run:\033[0m\n"
-    printf "  \033[1m$SCRIPT_NAME --resume [other-options]\033[0m\n"
+    printf "%sTo resume this session, run:%s\n" "$(colorize "$COLOR_GREEN" "")" "$(colorize "$COLOR_RESET" "")"
+    printf "  %s%s --resume [other-options]%s\n" "$(colorize "$COLOR_BOLD" "")" "$SCRIPT_NAME" "$(colorize "$COLOR_RESET" "")"
     echo ""
-    printf "\033[1mState saved to:\033[0m $RESUME_STATE_FILE\n"
-    printf "\033[1m(Also saved as:\033[0m $STATE_FILE\033[1m)\033[0m\n"
+    printf "%sState saved to:%s %s\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$RESUME_STATE_FILE"
+    printf "%s(Also saved as:%s %s%s)%s\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$STATE_FILE" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")"
 }
 
 # Check if we should continue processing (not interrupted)
@@ -374,6 +456,7 @@ OPTIONS:
     --exclude-regex PATTERN Exclude files matching this regex pattern
     -q, --quiet            Suppress non-error output
     --debug                Show debug information (verbose logging)
+    --no-color             Disable colored output (also respects NO_COLOR env var)
     -c, --config FILE      Use custom config file (default: $DEFAULT_CONFIG_FILE)
     -h, --help             Show this help message
     -v, --version          Show version information
@@ -388,6 +471,7 @@ CONFIG FILE:
     QUIET=0
     SHOW_PROGRESS=1
     DEBUG=0
+    USE_COLORS=1
 
 EXAMPLES:
     $SCRIPT_NAME https://ftp.yourserever.net/media/ "movie 2023"
@@ -448,6 +532,7 @@ load_config() {
             QUIET) QUIET="$value" ;;
             DEBUG) DEBUG="$value" ;;
             SHOW_PROGRESS) SHOW_PROGRESS="$value" ;;
+            USE_COLORS) USE_COLORS="$value" ;;
             MIN_FILE_SIZE) MIN_FILE_SIZE="$value" ;;
             MAX_FILE_SIZE) MAX_FILE_SIZE="$value" ;;
             EXCLUDE_EXTENSIONS) EXCLUDE_EXTENSIONS="$value" ;;
@@ -872,7 +957,7 @@ find_matching_folders() {
 
         # Check if folder matches keywords
         if matches_keywords "$folder_name"; then
-            log "  -> MATCH: $folder_name"
+            log "  -> $(color_prefix "$COLOR_GREEN")MATCH:$(color_suffix) $(color_prefix "$COLOR_BLUE")$folder_name$(color_suffix)"
             debug "  DEBUG: Storing in matches - folder_name='$folder_name', display_path='$display_path'"
             # Store only the base folder name, not the full path
             printf '%s|%s|%s\n' "$full_folder_url" "$display_path" "$folder_name" >> "$TEMP_DIR/matches"
@@ -1178,9 +1263,9 @@ scan_directory_files() {
 # Show download summary
 show_download_summary() {
     printf "\n"
-    printf "========================================\n"
-    printf "      DOWNLOAD SUMMARY\n"
-    printf "========================================\n"
+    printf "%s========================================%s\n" "$(colorize "$COLOR_BLUE" "")" "$(colorize "$COLOR_RESET" "")"
+    printf "%s      DOWNLOAD SUMMARY%s\n" "$(colorize "$COLOR_BLUE" "")" "$(colorize "$COLOR_RESET" "")"
+    printf "%s========================================%s\n" "$(colorize "$COLOR_BLUE" "")" "$(colorize "$COLOR_RESET" "")"
 
     # Check for duplicate entries in download queue
     if [ -f "$DOWNLOAD_QUEUE_FILE" ]; then
@@ -1203,33 +1288,33 @@ show_download_summary() {
     total_skipped=$((MEDIA_SKIPPED_COUNT + POSTER_SKIPPED_COUNT + SUBTITLE_SKIPPED_COUNT))
 
     # Show files to download by type
-    printf "Files to download:\n"
+    printf "%sFiles to download:%s\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")"
     if [ "$MEDIA_FILES_COUNT" -gt 0 ]; then
         media_size=$(format_bytes "$MEDIA_TOTAL_SIZE")
-        printf "  Media files:    %3d (%s)\n" "$MEDIA_FILES_COUNT" "$media_size"
+        printf "  %sMedia files:%s    %3d (%s)\n" "$(colorize "$COLOR_GREEN" "")" "$(colorize "$COLOR_RESET" "")" "$MEDIA_FILES_COUNT" "$media_size"
     fi
 
     if [ "$POSTER_FILES_COUNT" -gt 0 ]; then
         poster_size=$(format_bytes "$POSTER_TOTAL_SIZE")
-        printf "  Image files:    %3d (%s)\n" "$POSTER_FILES_COUNT" "$poster_size"
+        printf "  %sImage files:%s    %3d (%s)\n" "$(colorize "$COLOR_CYAN" "")" "$(colorize "$COLOR_RESET" "")" "$POSTER_FILES_COUNT" "$poster_size"
     fi
 
     if [ "$SUBTITLE_FILES_COUNT" -gt 0 ]; then
         subtitle_size=$(format_bytes "$SUBTITLE_TOTAL_SIZE")
-        printf "  Subtitle files: %3d (%s)\n" "$SUBTITLE_FILES_COUNT" "$subtitle_size"
+        printf "  %sSubtitle files:%s %3d (%s)\n" "$(colorize "$COLOR_CYAN" "")" "$(colorize "$COLOR_RESET" "")" "$SUBTITLE_FILES_COUNT" "$subtitle_size"
     fi
 
     # Show files to skip by type
     if [ "$total_skipped" -gt 0 ]; then
-        printf "\nFiles to skip (already exist):\n"
+        printf "\n%sFiles to skip (already exist):%s\n" "$(colorize "$COLOR_YELLOW" "")" "$(colorize "$COLOR_RESET" "")"
         if [ "$MEDIA_SKIPPED_COUNT" -gt 0 ]; then
-            printf "  Media files:    %3d\n" "$MEDIA_SKIPPED_COUNT"
+            printf "  %sMedia files:%s    %3d\n" "$(colorize "$COLOR_GRAY" "")" "$(colorize "$COLOR_RESET" "")" "$MEDIA_SKIPPED_COUNT"
         fi
         if [ "$POSTER_SKIPPED_COUNT" -gt 0 ]; then
-            printf "  Image files:    %3d\n" "$POSTER_SKIPPED_COUNT"
+            printf "  %sImage files:%s    %3d\n" "$(colorize "$COLOR_GRAY" "")" "$(colorize "$COLOR_RESET" "")" "$POSTER_SKIPPED_COUNT"
         fi
         if [ "$SUBTITLE_SKIPPED_COUNT" -gt 0 ]; then
-            printf "  Subtitle files: %3d\n" "$SUBTITLE_SKIPPED_COUNT"
+            printf "  %sSubtitle files:%s %3d\n" "$(colorize "$COLOR_GRAY" "")" "$(colorize "$COLOR_RESET" "")" "$SUBTITLE_SKIPPED_COUNT"
         fi
     fi
 
@@ -1263,14 +1348,14 @@ show_download_summary() {
     fi
 
     # Show totals
-    printf "\nTotal files to download: %d\n" "$TOTAL_FILES_TO_DOWNLOAD"
+    printf "\n%sTotal files to download:%s %d\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$TOTAL_FILES_TO_DOWNLOAD"
     if [ "$total_skipped" -gt 0 ]; then
-        printf "Total files to skip:   %d\n" "$total_skipped"
+        printf "%sTotal files to skip:%s   %d\n" "$(colorize "$COLOR_YELLOW" "")" "$(colorize "$COLOR_RESET" "")" "$total_skipped"
     fi
 
     if [ "$total_download_size" -gt 0 ]; then
         total_size_formatted=$(format_bytes "$total_download_size")
-        printf "Total download size:   %s\n" "$total_size_formatted"
+        printf "%sTotal download size:%s   %s\n" "$(colorize "$COLOR_BOLD" "")" "$(colorize "$COLOR_RESET" "")" "$total_size_formatted"
 
         # Estimate download time (assuming 1MB/s as conservative estimate)
         if [ "$total_download_size" -gt 1048576 ]; then
@@ -1278,18 +1363,18 @@ show_download_summary() {
             if [ "$estimate_seconds" -gt 3600 ]; then
                 estimate_hours=$((estimate_seconds / 3600))
                 estimate_minutes=$(((estimate_seconds % 3600) / 60))
-                printf "Estimated time:        ~%d hours %d minutes (at 1MB/s)\n" "$estimate_hours" "$estimate_minutes"
+                printf "%sEstimated time:%s        ~%d hours %d minutes (at 1MB/s)\n" "$(colorize "$COLOR_BLUE" "")" "$(colorize "$COLOR_RESET" "")" "$estimate_hours" "$estimate_minutes"
             elif [ "$estimate_seconds" -gt 60 ]; then
                 estimate_minutes=$((estimate_seconds / 60))
                 estimate_seconds=$((estimate_seconds % 60))
-                printf "Estimated time:        ~%d minutes %d seconds (at 1MB/s)\n" "$estimate_minutes" "$estimate_seconds"
+                printf "%sEstimated time:%s        ~%d minutes %d seconds (at 1MB/s)\n" "$(colorize "$COLOR_BLUE" "")" "$(colorize "$COLOR_RESET" "")" "$estimate_minutes" "$estimate_seconds"
             else
-                printf "Estimated time:        ~%d seconds (at 1MB/s)\n" "$estimate_seconds"
+                printf "%sEstimated time:%s        ~%d seconds (at 1MB/s)\n" "$(colorize "$COLOR_BLUE" "")" "$(colorize "$COLOR_RESET" "")" "$estimate_seconds"
             fi
         fi
     fi
 
-    printf "========================================\n"
+    printf "%s========================================%s\n" "$(colorize "$COLOR_BLUE" "")" "$(colorize "$COLOR_RESET" "")"
 }
 
 # Show download progress
@@ -1355,16 +1440,27 @@ show_download_progress() {
     # Format file size
     file_size_formatted=$(format_bytes "$file_size")
 
-    # Clear line and show progress
+    # Clear line and show progress - simplified for better compatibility
     printf "\r\033[K"  # Clear line
-    printf "[%s] %d/%d (%d%%) | %s | %s/s | ETA: %s" \
-           "$(date '+%H:%M:%S')" \
-           "$CURRENT_FILE_NUMBER" \
-           "$TOTAL_FILES_TO_DOWNLOAD" \
-           "$percentage" \
-           "$file_size_formatted" \
-           "$speed_display" \
-           "$remaining_time"
+    if [ "$USE_COLORS" -eq 1 ]; then
+        printf "\033[2;37m[%s]\033[0m \033[1;36m%d/%d\033[0m (\033[1;36m%d%%\033[0m) | \033[1;34m%s\033[0m | \033[1;32m%s/s\033[0m | \033[1;33mETA: %s\033[0m" \
+               "$(date '+%H:%M:%S')" \
+               "$CURRENT_FILE_NUMBER" \
+               "$TOTAL_FILES_TO_DOWNLOAD" \
+               "$percentage" \
+               "$file_size_formatted" \
+               "$speed_display" \
+               "$remaining_time"
+    else
+        printf "[%s] %d/%d (%d%%) | %s | %s/s | ETA: %s" \
+               "$(date '+%H:%M:%S')" \
+               "$CURRENT_FILE_NUMBER" \
+               "$TOTAL_FILES_TO_DOWNLOAD" \
+               "$percentage" \
+               "$file_size_formatted" \
+               "$speed_display" \
+               "$remaining_time"
+    fi
 
     # Show progress bar
     bar_width=30
@@ -1373,7 +1469,11 @@ show_download_progress() {
     printf " ["
     i=0
     while [ "$i" -lt "$filled" ]; do
-        printf "="
+        if [ "$USE_COLORS" -eq 1 ]; then
+            printf "\033[1;32m=\033[0m"
+        else
+            printf "="
+        fi
         i=$((i + 1))
     done
     while [ "$i" -lt "$bar_width" ]; do
@@ -1397,13 +1497,25 @@ complete_download_progress() {
 
     # Check if download was interrupted
     if [ "$INTERRUPTED" -eq 1 ]; then
-        printf "⏸ Download interrupted by user! %d files downloaded, %s\n" \
-               "$DOWNLOADED_FILES" \
-               "$(format_bytes "$DOWNLOADED_BYTES")"
+        if [ "$USE_COLORS" -eq 1 ]; then
+            printf "\033[1;33m⏸ Download interrupted by user!\033[0m %d files downloaded, %s\n" \
+                   "$DOWNLOADED_FILES" \
+                   "$(format_bytes "$DOWNLOADED_BYTES")"
+        else
+            printf "⏸ Download interrupted by user! %d files downloaded, %s\n" \
+                   "$DOWNLOADED_FILES" \
+                   "$(format_bytes "$DOWNLOADED_BYTES")"
+        fi
     else
-        printf "✓ Download completed! %d files, %s\n" \
-               "$DOWNLOADED_FILES" \
-               "$(format_bytes "$DOWNLOADED_BYTES")"
+        if [ "$USE_COLORS" -eq 1 ]; then
+            printf "\033[1;32m✓ Download completed!\033[0m %d files, %s\n" \
+                   "$DOWNLOADED_FILES" \
+                   "$(format_bytes "$DOWNLOADED_BYTES")"
+        else
+            printf "✓ Download completed! %d files, %s\n" \
+                   "$DOWNLOADED_FILES" \
+                   "$(format_bytes "$DOWNLOADED_BYTES")"
+        fi
     fi
 }
 
@@ -1447,7 +1559,11 @@ download_file() {
         if [ "$remote_size" -gt 0 ]; then
             if [ "$local_size" -eq "$remote_size" ]; then
                 # File exists and sizes match - skip download
-                log "  ✓ $filename ($(format_bytes "$local_size") - already exists)"
+                if [ "$USE_COLORS" -eq 1 ]; then
+                    log "  \033[1;32m✓\033[0m $filename ($(format_bytes "$local_size") - already exists)"
+                else
+                    log "  ✓ $filename ($(format_bytes "$local_size") - already exists)"
+                fi
                 debug "  SKIP: File complete, no download needed"
                 SKIPPED_FILES=$((SKIPPED_FILES + 1))
                 return 0
@@ -1455,16 +1571,28 @@ download_file() {
                 # File exists but is smaller - resume download
                 remaining_bytes=$((remote_size - local_size))
                 percent_complete=$((local_size * 100 / remote_size))
-                log "  ↻ $filename (resuming at ${percent_complete}% - $(format_bytes "$local_size")/$(format_bytes "$remote_size"))"
+                if [ "$USE_COLORS" -eq 1 ]; then
+                    log "  \033[1;36m↻\033[0m $filename (resuming at ${percent_complete}% - $(format_bytes "$local_size")/$(format_bytes "$remote_size"))"
+                else
+                    log "  ↻ $filename (resuming at ${percent_complete}% - $(format_bytes "$local_size")/$(format_bytes "$remote_size"))"
+                fi
                 debug "  RESUME: Partial file found, downloading remaining $remaining_bytes bytes"
                 will_resume=1
             elif [ "$local_size" -lt "$remote_size" ] && [ "$RESUME" -eq 0 ]; then
                 # File exists but is smaller and resume is disabled - redownload
-                log "  ↻ $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - incomplete, restarting)"
+                if [ "$USE_COLORS" -eq 1 ]; then
+                    log "  \033[1;33m↻\033[0m $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - incomplete, restarting)"
+                else
+                    log "  ↻ $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - incomplete, restarting)"
+                fi
                 debug "  RESTART: Partial file found but resume disabled"
             elif [ "$local_size" -gt "$remote_size" ]; then
                 # Local file is larger than expected - redownload
-                log "  ↻ $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - larger than expected, restarting)"
+                if [ "$USE_COLORS" -eq 1 ]; then
+                    log "  \033[1;33m↻\033[0m $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - larger than expected, restarting)"
+                else
+                    log "  ↻ $filename ($(format_bytes "$local_size") → $(format_bytes "$remote_size") - larger than expected, restarting)"
+                fi
                 debug "  RESTART: Local file larger than remote ($local_size > $remote_size)"
             fi
         else
@@ -1473,22 +1601,22 @@ download_file() {
                 # Check if file is likely complete by testing if we can read from it properly
                 # and if it hasn't been modified recently (to avoid corrupted files)
                 if [ "$local_size" -gt 1048576 ]; then  # File is larger than 1MB
-                    log "  ↻ $filename (remote size unknown, attempting resume from $(format_bytes "$local_size"))"
+                    log "  $(color_prefix "$COLOR_CYAN")↻$(color_suffix) $filename (remote size unknown, attempting resume from $(format_bytes "$local_size"))"
                     debug "  RESUME: Remote size unknown, will attempt resume"
                     will_resume=1
                 else
-                    log "  ? $filename (small file, size unknown - redownloading)"
+                    log "  $(color_prefix "$COLOR_YELLOW")?$(color_suffix) $filename (small file, size unknown - redownloading)"
                     debug "  RESTART: Small file with unknown size, will download fresh"
                     # For small files, it's safer to restart than to risk corruption
                 fi
             else
-                log "  ? $filename (size unknown - redownloading)"
+                log "  $(color_prefix "$COLOR_YELLOW")?$(color_suffix) $filename (size unknown - redownloading)"
                 debug "  RESTART: Size unknown, will download fresh"
             fi
         fi
     elif [ -f "$local_path" ] && [ "$FORCE_OVERWRITE" -eq 1 ]; then
         # File exists but force overwrite is enabled
-        log "  ↻ $filename (force overwrite)"
+        log "  $(color_prefix "$COLOR_YELLOW")↻$(color_suffix) $filename (force overwrite)"
         debug "  RESTART: Force overwrite enabled"
     else
         # File doesn't exist - fresh download
@@ -1562,7 +1690,11 @@ download_file() {
     should_continue || return 1
 
     # Start download with background monitoring
-    log "  ↓ $filename ($(format_bytes "$file_size") - downloading...)"
+    if [ "$USE_COLORS" -eq 1 ]; then
+        log "  \033[1;34m↓\033[0m $filename ($(format_bytes "$file_size") - downloading...)"
+    else
+        log "  ↓ $filename ($(format_bytes "$file_size") - downloading...)"
+    fi
 
     # Run curl in background to monitor for interruptions
     debug "    Executing: curl $curl_opts -o \"$local_path\" \"$file_url\""
@@ -1577,7 +1709,11 @@ download_file() {
             kill -TERM "$curl_pid" 2>/dev/null || true
             wait "$curl_pid" 2>/dev/null || true
             echo ""
-            log "  ⏸ $filename (download interrupted - can be resumed)"
+            if [ "$USE_COLORS" -eq 1 ]; then
+                log "  \033[1;33m⏸\033[0m $filename (download interrupted - can be resumed)"
+            else
+                log "  ⏸ $filename (download interrupted - can be resumed)"
+            fi
             return 1
         fi
 
@@ -1607,10 +1743,10 @@ download_file() {
         final_size=$(wc -c < "$local_path" 2>/dev/null || printf '0')
         if [ "$final_size" -lt "$initial_size" ]; then
             debug "  WARNING: Resume may have failed - final size ($final_size) < initial size ($initial_size)"
-            log "  ⚠ Resume warning: File size decreased from $(format_bytes "$initial_size") to $(format_bytes "$final_size")"
+            log "  $(color_prefix "$COLOR_YELLOW")⚠$(color_suffix) Resume warning: File size decreased from $(format_bytes "$initial_size") to $(format_bytes "$final_size")"
             # Try to restore from backup if it exists
             if [ -f "${local_path}.resume_backup" ]; then
-                log "  ↻ Restoring from backup due to resume failure"
+                log "  $(color_prefix "$COLOR_YELLOW")↻$(color_suffix) Restoring from backup due to resume failure"
                 mv "${local_path}.resume_backup" "$local_path" 2>/dev/null || true
             fi
         else
@@ -1637,11 +1773,11 @@ download_file() {
                 debug "  SUCCESS: File size matches remote ($final_size = $remote_size)"
             elif [ "$final_size" -lt "$remote_size" ]; then
                 debug "  ERROR: File still incomplete ($final_size < $remote_size)"
-                log "  ✗ $filename (download incomplete: $(format_bytes "$final_size")/$(format_bytes "$remote_size"))"
+                log "  $(color_prefix "$COLOR_RED")✗$(color_suffix) $filename (download incomplete: $(format_bytes "$final_size")/$(format_bytes "$remote_size"))"
                 download_complete=0
             elif [ "$final_size" -gt "$remote_size" ]; then
                 debug "  WARNING: File larger than expected ($final_size > $remote_size)"
-                log "  ⚠ $filename (file larger than expected: $(format_bytes "$final_size") vs $(format_bytes "$remote_size"))"
+                log "  $(color_prefix "$COLOR_YELLOW")⚠$(color_suffix) $filename (file larger than expected: $(format_bytes "$final_size") vs $(format_bytes "$remote_size"))"
                 # Don't treat this as an error, just a warning
             fi
         else
@@ -1683,10 +1819,18 @@ download_file() {
         CURRENT_DOWNLOAD_FILE=""
 
         DOWNLOADED_FILES=$((DOWNLOADED_FILES + 1))
-        log "  ✓ $filename ($(format_bytes "$final_size"))"
+        if [ "$USE_COLORS" -eq 1 ]; then
+            log "  \033[1;32m✓\033[0m $filename ($(format_bytes "$final_size"))"
+        else
+            log "  ✓ $filename ($(format_bytes "$final_size"))"
+        fi
         return 0
     else
-        error "  ✗ Failed: $filename"
+        if [ "$USE_COLORS" -eq 1 ]; then
+            error "  \033[1;31m✗\033[0m Failed: $filename"
+        else
+            error "  ✗ Failed: $filename"
+        fi
         debug "    URL: $file_url"
 
         # Try to get HTTP status code for better error reporting
@@ -1953,6 +2097,20 @@ parse_arguments() {
                 ;;
             --debug)
                 DEBUG=1
+                shift
+                ;;
+            --no-color)
+                USE_COLORS=0
+                # Reset all color variables to empty strings
+                COLOR_RESET=''
+                COLOR_BOLD=''
+                COLOR_RED=''
+                COLOR_GREEN=''
+                COLOR_YELLOW=''
+                COLOR_BLUE=''
+                COLOR_CYAN=''
+                COLOR_GRAY=''
+                COLOR_WHITE=''
                 shift
                 ;;
             --min-size)
